@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+    <title>Start Roomba</title>
+
+    <link
+        rel="stylesheet"
+        href="{{ url_for('static', filename='style.css') }}"
+    >
+</head>
+
+<body>
+    <main class="controller">
+        <h1>Roomba</h1>
+
+        <p id="start-status">
+            Ready to connect
+        </p>
+
+        <button
+            class="start-button"
+            id="start-button"
+        >
+            Start Roomba
+        </button>
+    </main>
+
+    <script>
+        const startButton = document.getElementById("start-button");
+        const statusText = document.getElementById("start-status");
+
+        startButton.addEventListener("click", async () => {
+            startButton.disabled = true;
+            statusText.textContent = "Starting Roomba...";
+
+            try {
+                const response = await fetch("/start", {
+                    method: "POST"
+                });
+
+                const data = await response.json();
+
+                if (!response.ok || !data.ok) {
+                    throw new Error(data.error || "Start failed");
+                }
+
+                statusText.textContent = "Connected";
+                window.location.href = data.redirect;
+            } catch (error) {
+                statusText.textContent = "Could not start Roomba";
+                startButton.disabled = false;
+                console.error(error);
+            }
+        });
+    </script>
+</body>
+</html>

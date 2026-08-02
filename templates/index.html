@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0, user-scalable=no"
+    >
+
+    <title>Roomba Remote</title>
+
+    <link
+        rel="stylesheet"
+        href="{{ url_for('static', filename='style.css') }}"
+    >
+</head>
+
+<body>
+    <main class="controller">
+        <header class="top-bar">
+            <div>
+                <h1>Roomba Remote</h1>
+                <p id="status" class="status">Stopped</p>
+            </div>
+
+            <button id="stop" class="stop-button">
+                STOP
+            </button>
+        </header>
+
+        <section class="drive-area">
+            <div class="joystick-section">
+                <span class="joystick-title">
+                    Forward / Back
+                </span>
+
+                <div
+                    class="joystick vertical-joystick"
+                    id="throttle-joystick"
+                >
+                    <span class="axis-label top-label">Forward</span>
+                    <span class="axis-label bottom-label">Reverse</span>
+
+                    <div class="vertical-axis"></div>
+                    <div class="horizontal-center"></div>
+                    <div class="joystick-knob"></div>
+                </div>
+
+                <output id="throttle-value">0</output>
+            </div>
+
+            <div class="center-panel">
+                <section class="speed-control">
+                    <label for="speed">
+                        Maximum speed
+                    </label>
+
+                    <strong>
+                        <span id="speed-value">300</span>
+                        mm/s
+                    </strong>
+
+                    <input
+                        id="speed"
+                        type="range"
+                        min="50"
+                        max="500"
+                        step="25"
+                        value="300"
+                    >
+                </section>
+
+                <button id="vacuum" class="vacuum-button">
+                    Cleaning ON
+                </button>
+
+                <div class="wheel-readings">
+                    <div>
+                        <span>Left wheel</span>
+                        <strong id="left-wheel-value">0</strong>
+                    </div>
+
+                    <div>
+                        <span>Right wheel</span>
+                        <strong id="right-wheel-value">0</strong>
+                    </div>
+                </div>
+            </div>
+
+            <div class="joystick-section">
+                <span class="joystick-title">
+                    Steering
+                </span>
+
+                <div
+                    class="joystick horizontal-joystick"
+                    id="steering-joystick"
+                >
+                    <span class="axis-label left-label">Left</span>
+                    <span class="axis-label right-label">Right</span>
+
+                    <div class="horizontal-axis"></div>
+                    <div class="vertical-center"></div>
+                    <div class="joystick-knob"></div>
+                </div>
+
+                <output id="steering-value">0</output>
+            </div>
+        </section>
+
+        <p class="instructions">
+            Use both joysticks together. The left controls speed;
+            the right controls steering.
+        </p>
+    </main>
+
+    <script
+        src="{{ url_for('static', filename='script.js') }}"
+    ></script>
+</body>
+</html>
