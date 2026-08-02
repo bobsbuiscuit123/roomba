@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0, user-scalable=no"
+    >
+
+    <title>Roomba Autonomous</title>
+
+    <link
+        rel="stylesheet"
+        href="{{ url_for('static', filename='style.css') }}"
+    >
+</head>
+
+<body class="autonomous-body mapping-locked">
+    <main class="controller autonomous-controller">
+        <header class="top-bar">
+            <div>
+                <h1>Autonomous</h1>
+                <p id="auto-status" class="status">Ready</p>
+            </div>
+
+            <div class="top-actions">
+                <a
+                    class="nav-button"
+                    href="{{ url_for('modes') }}"
+                >
+                    Modes
+                </a>
+
+                <button id="auto-stop" class="stop-button">
+                    STOP
+                </button>
+            </div>
+        </header>
+
+        <section class="autonomous-layout">
+            <section class="map-panel">
+                <div class="panel-header">
+                    <h2>Map</h2>
+                    <span id="map-scale">Dock origin</span>
+                </div>
+
+                <svg
+                    id="map-view"
+                    class="map-view"
+                    role="img"
+                    aria-label="Saved room map"
+                ></svg>
+            </section>
+
+            <section class="room-panel">
+                <div class="panel-header">
+                    <h2>Rooms</h2>
+                    <span id="room-count">0 saved</span>
+                </div>
+
+                <div
+                    id="room-list"
+                    class="room-list"
+                ></div>
+
+                <div class="button-row">
+                    <button
+                        id="start-clean"
+                        class="primary-button"
+                    >
+                        Clean Selected
+                    </button>
+
+                    <button
+                        id="dock-now"
+                        class="secondary-button"
+                    >
+                        Dock
+                    </button>
+                </div>
+            </section>
+        </section>
+
+        <section class="mapping-panel">
+            <div class="panel-header">
+                <h2>Mapping</h2>
+                <span id="mapping-state">Idle</span>
+            </div>
+
+            <div class="mapping-actions">
+                <input
+                    id="room-name"
+                    class="room-name-input"
+                    type="text"
+                    placeholder="Room name"
+                    autocomplete="off"
+                >
+
+                <button
+                    id="start-mapping"
+                    class="primary-button"
+                >
+                    Start Map
+                </button>
+
+                <button
+                    id="back-at-dock"
+                    class="secondary-button"
+                    disabled
+                >
+                    Back At Dock
+                </button>
+
+                <button
+                    id="save-room"
+                    class="primary-button"
+                    disabled
+                >
+                    Save Room
+                </button>
+
+                <button
+                    id="cancel-mapping"
+                    class="secondary-button"
+                    disabled
+                >
+                    Cancel
+                </button>
+            </div>
+
+            <section class="drive-area mapping-drive">
+                <div class="joystick-section">
+                    <span class="joystick-title">
+                        Forward / Back
+                    </span>
+
+                    <div
+                        class="joystick vertical-joystick"
+                        id="mapping-throttle-joystick"
+                    >
+                        <span class="axis-label top-label">Forward</span>
+                        <span class="axis-label bottom-label">Reverse</span>
+
+                        <div class="vertical-axis"></div>
+                        <div class="horizontal-center"></div>
+                        <div class="joystick-knob"></div>
+                    </div>
+
+                    <output id="mapping-throttle-value">0%</output>
+                </div>
+
+                <div class="center-panel">
+                    <section class="speed-control">
+                        <label for="mapping-speed">
+                            Maximum speed
+                        </label>
+
+                        <strong>
+                            <span id="mapping-speed-value">250</span>
+                            mm/s
+                        </strong>
+
+                        <input
+                            id="mapping-speed"
+                            type="range"
+                            min="50"
+                            max="400"
+                            step="25"
+                            value="250"
+                        >
+                    </section>
+
+                    <div class="wheel-readings">
+                        <div>
+                            <span>Left wheel</span>
+                            <strong id="mapping-left-wheel-value">0</strong>
+                        </div>
+
+                        <div>
+                            <span>Right wheel</span>
+                            <strong id="mapping-right-wheel-value">0</strong>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="joystick-section">
+                    <span class="joystick-title">
+                        Steering
+                    </span>
+
+                    <div
+                        class="joystick horizontal-joystick"
+                        id="mapping-steering-joystick"
+                    >
+                        <span class="axis-label left-label">Left</span>
+                        <span class="axis-label right-label">Right</span>
+
+                        <div class="horizontal-axis"></div>
+                        <div class="vertical-center"></div>
+                        <div class="joystick-knob"></div>
+                    </div>
+
+                    <output id="mapping-steering-value">0%</output>
+                </div>
+            </section>
+        </section>
+    </main>
+
+    <script
+        src="{{ url_for('static', filename='autonomous.js') }}"
+    ></script>
+</body>
+</html>

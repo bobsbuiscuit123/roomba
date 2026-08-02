@@ -58,6 +58,9 @@ class RoombaController:
         self._send([138, 0])
         self.vacuum_enabled = False
 
+    def seek_dock(self) -> None:
+        self._send([143])
+
     def close(self) -> None:
         try:
             self.stop()

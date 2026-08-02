@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0, user-scalable=no"
+    >
+
+    <title>Roomba Modes</title>
+
+    <link
+        rel="stylesheet"
+        href="{{ url_for('static', filename='style.css') }}"
+    >
+</head>
+
+<body class="mode-body">
+    <main class="controller mode-controller">
+        <header class="top-bar">
+            <div>
+                <h1>Roomba Mode</h1>
+                <p class="status">Connected</p>
+            </div>
+        </header>
+
+        <section class="mode-grid">
+            <a
+                class="mode-link manual-mode"
+                href="{{ url_for('controls') }}"
+            >
+                <strong>Manual</strong>
+                <span>Joysticks</span>
+            </a>
+
+            <a
+                class="mode-link autonomous-mode"
+                href="{{ url_for('autonomous') }}"
+            >
+                <strong>Autonomous</strong>
+                <span>Mapping</span>
+            </a>
+        </section>
+    </main>
+</body>
+</html>

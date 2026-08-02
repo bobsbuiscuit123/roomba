@@ -21,6 +21,15 @@ body {
     -webkit-user-select: none;
 }
 
+.mode-body,
+.autonomous-body {
+    touch-action: pan-y;
+}
+
+.autonomous-body .joystick {
+    touch-action: none;
+}
+
 .controller {
     width: 100%;
     max-width: 1000px;
@@ -238,6 +247,12 @@ button:active {
     transform: scale(0.97);
 }
 
+button:disabled {
+    cursor: not-allowed;
+    opacity: 0.48;
+    transform: none;
+}
+
 .stop-button {
     min-width: 110px;
     background: #ef4444;
@@ -253,6 +268,221 @@ button:active {
     text-align: center;
     color: #d1d5db;
     font-size: 14px;
+}
+
+.top-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.nav-button,
+.mode-link {
+    color: white;
+    text-decoration: none;
+}
+
+.nav-button {
+    display: inline-grid;
+    min-height: 52px;
+    min-width: 86px;
+    place-items: center;
+    padding: 0 16px;
+    border-radius: 15px;
+    background: #374151;
+    font-size: 16px;
+    font-weight: bold;
+}
+
+.mode-controller {
+    max-width: 760px;
+}
+
+.mode-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+    margin-top: 18px;
+}
+
+.mode-link {
+    display: grid;
+    min-height: 190px;
+    align-content: center;
+    gap: 8px;
+    padding: 22px;
+    border-radius: 18px;
+}
+
+.mode-link strong,
+.mode-link span {
+    display: block;
+}
+
+.mode-link strong {
+    font-size: 30px;
+}
+
+.mode-link span {
+    color: #f8fafc;
+    font-size: 17px;
+}
+
+.manual-mode {
+    background: linear-gradient(135deg, #2563eb, #0f766e);
+}
+
+.autonomous-mode {
+    background: linear-gradient(135deg, #7c2d12, #15803d);
+}
+
+.autonomous-controller {
+    max-width: 1180px;
+}
+
+.autonomous-layout {
+    display: grid;
+    grid-template-columns: minmax(320px, 1.3fr) minmax(260px, 0.7fr);
+    gap: 14px;
+    margin-top: 16px;
+}
+
+.map-panel,
+.room-panel,
+.mapping-panel {
+    padding: 14px;
+    border-radius: 16px;
+    background: #111827;
+}
+
+.panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.panel-header h2 {
+    margin: 0;
+    font-size: 18px;
+}
+
+.panel-header span {
+    color: #d1d5db;
+    font-size: 13px;
+}
+
+.map-view {
+    display: block;
+    width: 100%;
+    height: 370px;
+    border-radius: 12px;
+    background:
+        linear-gradient(#1f2937 1px, transparent 1px),
+        linear-gradient(90deg, #1f2937 1px, transparent 1px),
+        #030712;
+    background-size: 28px 28px;
+}
+
+.room-list {
+    display: grid;
+    gap: 8px;
+    min-height: 92px;
+}
+
+.room-empty {
+    margin: 0;
+    padding: 16px;
+    border-radius: 12px;
+    background: #1f2937;
+    color: #d1d5db;
+}
+
+.room-item {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: 10px;
+    min-height: 58px;
+    padding: 10px;
+    border-radius: 12px;
+    background: #1f2937;
+}
+
+.room-item input {
+    width: 20px;
+    height: 20px;
+}
+
+.room-details {
+    display: grid;
+    gap: 3px;
+}
+
+.room-details small {
+    color: #d1d5db;
+}
+
+.delete-room {
+    min-height: 38px;
+    padding: 0 10px;
+    border-radius: 10px;
+    background: #7f1d1d;
+    font-size: 13px;
+}
+
+.button-row,
+.mapping-actions {
+    display: grid;
+    gap: 8px;
+}
+
+.button-row {
+    grid-template-columns: 1fr 0.65fr;
+    margin-top: 12px;
+}
+
+.primary-button {
+    background: #2563eb;
+}
+
+.secondary-button {
+    background: #374151;
+}
+
+.mapping-panel {
+    margin-top: 14px;
+}
+
+.mapping-actions {
+    grid-template-columns:
+        minmax(170px, 1fr)
+        repeat(4, minmax(120px, auto));
+    margin-bottom: 12px;
+}
+
+.room-name-input {
+    min-height: 52px;
+    width: 100%;
+    border: 2px solid #374151;
+    border-radius: 14px;
+    padding: 0 14px;
+    background: #030712;
+    color: white;
+    font-size: 16px;
+}
+
+.room-name-input::placeholder {
+    color: #9ca3af;
+}
+
+.mapping-drive {
+    margin-top: 0;
+}
+
+.mapping-locked .mapping-drive .joystick {
+    opacity: 0.48;
 }
 
 
@@ -322,6 +552,40 @@ button:active {
         font-size: 15px;
     }
 
+    .nav-button {
+        min-height: 45px;
+        font-size: 15px;
+    }
+
+    .autonomous-layout {
+        grid-template-columns: 1fr 0.8fr;
+        gap: 8px;
+        margin-top: 8px;
+    }
+
+    .map-panel,
+    .room-panel,
+    .mapping-panel {
+        padding: 9px;
+    }
+
+    .map-view {
+        height: 210px;
+    }
+
+    .mapping-actions {
+        grid-template-columns:
+            minmax(130px, 1fr)
+            repeat(4, minmax(86px, auto));
+        gap: 6px;
+    }
+
+    .mapping-actions button,
+    .room-name-input {
+        min-height: 42px;
+        font-size: 13px;
+    }
+
     .instructions {
         display: none;
     }
@@ -338,5 +602,20 @@ button:active {
     .center-panel {
         width: min(100%, 360px);
         justify-self: center;
+    }
+
+    .mode-grid,
+    .autonomous-layout,
+    .mapping-actions,
+    .button-row {
+        grid-template-columns: 1fr;
+    }
+
+    .mode-link {
+        min-height: 140px;
+    }
+
+    .map-view {
+        height: 320px;
     }
 }
