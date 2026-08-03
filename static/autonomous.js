@@ -669,7 +669,14 @@ function renderRoomList(rooms) {
 
         checkbox.addEventListener("change", () => {
             if (checkbox.checked) {
+                selectedRoomIds.clear();
                 selectedRoomIds.add(room.id);
+
+                roomList
+                    .querySelectorAll("input[type='checkbox']")
+                    .forEach((input) => {
+                        input.checked = input.value === room.id;
+                    });
             } else {
                 selectedRoomIds.delete(room.id);
             }
@@ -758,6 +765,7 @@ function applyState(data) {
     startCleanButton.disabled =
         !AUTONOMOUS_DRIVING_ENABLED
         || rooms.length === 0
+        || selectedRoomIds.size === 0
         || currentCleaningState === "running";
 
     startCleanButton.textContent = AUTONOMOUS_DRIVING_ENABLED

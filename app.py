@@ -1,6 +1,6 @@
 from flask import Flask, jsonify, redirect, render_template, request, url_for
 
-from autonomous import AutonomousCleaner, RoomMapStore, build_safe_cleaning_route
+from autonomous import AutonomousCleaner, RoomMapStore, build_cleaning_preview_route
 from roomba import RoombaController
 
 
@@ -75,10 +75,13 @@ def drive():
             "error": "Invalid wheel speeds",
         }), 400
 
-    if cleaner.status()["state"] == "running" and (left != 0 or right != 0):
+    if (
+        cleaner.status()["state"] in {"running", "docking"}
+        and (left != 0 or right != 0)
+    ):
         return jsonify({
             "ok": False,
-            "error": "Autonomous cleaning is using the wheels",
+            "error": "The Roomba is using the wheels",
         }), 409
 
     left = max(-roomba.speed, min(roomba.speed, left))
@@ -151,13 +154,7 @@ def autonomous_state():
 
     for room in state["rooms"]:
         try:
-            route = build_safe_cleaning_route(room["points"])
-            routes[room["id"]] = (
-                [[0.0, 0.0]]
-                + route
-                + list(reversed(route[:-1]))
-                + [[0.0, 0.0]]
-            )
+            routes[room["id"]] = build_cleaning_preview_route(room["points"])
         except ValueError as error:
             route_errors[room["id"]] = str(error)
 
@@ -177,10 +174,10 @@ def mapping_start():
             "error": "Start the Roomba first",
         }), 409
 
-    if cleaner.status()["state"] == "running":
+    if cleaner.status()["state"] in {"running", "docking"}:
         return jsonify({
             "ok": False,
-            "error": "Stop autonomous cleaning first",
+            "error": "Stop the current Roomba action first",
         }), 409
 
     try:

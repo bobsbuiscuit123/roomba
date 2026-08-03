@@ -11,11 +11,13 @@ from typing import Any, Optional
 WHEEL_BASE_MM = 235.0
 MIN_POINT_SPACING_MM = 80.0
 MIN_ROOM_AREA_MM2 = 20_000.0
-COVERAGE_SPACING_MM = 360.0
-COVERAGE_EDGE_MARGIN_MM = 180.0
+COVERAGE_SPACING_MM = 180.0
+COVERAGE_EDGE_MARGIN_MM = 100.0
+DOCK_APPROACH_DISTANCE_MM = 420.0
+UNDOCK_DISTANCE_MM = 260.0
 MAX_CLEANING_ROOM_SPAN_MM = 8_000.0
 MAX_CLEANING_ROOM_AREA_MM2 = 60_000_000.0
-MAX_CLEANING_ROUTE_POINTS = 220
+MAX_CLEANING_ROUTE_POINTS = 500
 MAX_CLEANING_SEGMENT_MM = 6_000.0
 MAX_CLEANING_DURATION_SECONDS = 20 * 60
 AUTONOMOUS_HEARTBEAT_TIMEOUT_SECONDS = 2.5
@@ -67,6 +69,33 @@ def _polygon_area(points: list[list[float]]) -> float:
         area += x1 * y2 - x2 * y1
 
     return abs(area) / 2
+
+
+def _polygon_centroid(points: list[list[float]]) -> list[float]:
+    if len(points) < 4:
+        return [0.0, 0.0]
+
+    area_accumulator = 0.0
+    x_accumulator = 0.0
+    y_accumulator = 0.0
+
+    for index in range(len(points) - 1):
+        x1, y1 = points[index]
+        x2, y2 = points[index + 1]
+        cross = x1 * y2 - x2 * y1
+        area_accumulator += cross
+        x_accumulator += (x1 + x2) * cross
+        y_accumulator += (y1 + y2) * cross
+
+    if abs(area_accumulator) <= 1e-7:
+        xs = [point[0] for point in points[:-1]]
+        ys = [point[1] for point in points[:-1]]
+        return [sum(xs) / len(xs), sum(ys) / len(ys)]
+
+    return [
+        x_accumulator / (3 * area_accumulator),
+        y_accumulator / (3 * area_accumulator),
+    ]
 
 
 def _bounds(points: list[list[float]]) -> dict[str, float]:
@@ -367,17 +396,16 @@ def _line_polygon_intersections(
     return intersections
 
 
-def build_coverage_route(
+def _build_coverage_segments(
     polygon: list[list[float]],
     spacing_mm: float = COVERAGE_SPACING_MM,
     edge_margin_mm: float = COVERAGE_EDGE_MARGIN_MM,
-) -> list[list[float]]:
+) -> list[tuple[list[float], list[float]]]:
     room_bounds = _bounds(polygon)
-    y_value = room_bounds["min_y"] + spacing_mm / 2
-    route: list[list[float]] = []
-    left_to_right = True
+    y_value = room_bounds["min_y"] + edge_margin_mm
+    segments: list[tuple[list[float], list[float]]] = []
 
-    while y_value <= room_bounds["max_y"]:
+    while y_value <= room_bounds["max_y"] - edge_margin_mm:
         intersections = _line_polygon_intersections(polygon, y_value)
 
         for index in range(0, len(intersections) - 1, 2):
@@ -385,7 +413,7 @@ def build_coverage_route(
             second_x = intersections[index + 1]
             span_width = second_x - first_x
 
-            if span_width < edge_margin_mm:
+            if span_width < edge_margin_mm * 1.5:
                 continue
 
             if span_width > edge_margin_mm * 2:
@@ -396,21 +424,153 @@ def build_coverage_route(
                 first = [center, y_value]
                 second = [center, y_value]
 
-            if left_to_right:
-                route.extend([first, second])
-            else:
-                route.extend([second, first])
+            segment = (_round_point(first), _round_point(second))
 
-            left_to_right = not left_to_right
+            if _segment_stays_in_polygon(segment[0], segment[1], polygon):
+                segments.append(segment)
 
         y_value += spacing_mm
 
-    if route:
-        return [_round_point(point) for point in route]
+    return segments
 
-    x_center = (room_bounds["min_x"] + room_bounds["max_x"]) / 2
-    y_center = (room_bounds["min_y"] + room_bounds["max_y"]) / 2
-    return [[round(x_center, 1), round(y_center, 1)]]
+
+def _dock_approach_point(
+    polygon: list[list[float]],
+    distance_mm: float = DOCK_APPROACH_DISTANCE_MM,
+) -> list[float]:
+    straight_back_distances = [
+        distance_mm,
+        distance_mm * 0.75,
+        distance_mm * 0.5,
+        distance_mm * 1.25,
+    ]
+
+    for candidate_distance in straight_back_distances:
+        point = [0.0, -candidate_distance]
+        rounded = _round_point(point)
+
+        if (
+            _point_in_or_on_polygon(rounded, polygon)
+            and _segment_stays_in_polygon([0.0, 0.0], rounded, polygon)
+        ):
+            return rounded
+
+    centroid = _polygon_centroid(polygon)
+    preferred_angle = math.atan2(centroid[0], centroid[1])
+    angle_offsets = [0.0]
+
+    for degrees in range(15, 181, 15):
+        radians = math.radians(degrees)
+        angle_offsets.extend([radians, -radians])
+
+    distances = [
+        distance_mm,
+        distance_mm * 0.75,
+        distance_mm * 0.5,
+        distance_mm * 1.25,
+    ]
+
+    for offset in angle_offsets:
+        angle = preferred_angle + offset
+
+        for candidate_distance in distances:
+            point = [
+                math.sin(angle) * candidate_distance,
+                math.cos(angle) * candidate_distance,
+            ]
+            rounded = _round_point(point)
+
+            if (
+                _point_in_or_on_polygon(rounded, polygon)
+                and _segment_stays_in_polygon([0.0, 0.0], rounded, polygon)
+            ):
+                return rounded
+
+    raise ValueError("Could not find a safe dock approach point")
+
+
+def _undock_point(
+    polygon: list[list[float]],
+    distance_mm: float = UNDOCK_DISTANCE_MM,
+) -> list[float]:
+    straight_back_distances = [
+        distance_mm,
+        distance_mm * 0.75,
+        distance_mm * 0.5,
+    ]
+
+    for candidate_distance in straight_back_distances:
+        point = [0.0, -candidate_distance]
+        rounded = _round_point(point)
+
+        if (
+            _point_in_or_on_polygon(rounded, polygon)
+            and _segment_stays_in_polygon([0.0, 0.0], rounded, polygon)
+        ):
+            return rounded
+
+    raise ValueError("Room map does not allow a straight reverse from dock")
+
+
+def _append_route_point(
+    route: list[list[float]],
+    point: list[float],
+) -> None:
+    rounded = _round_point(point)
+
+    if not route or _distance(route[-1], rounded) > 5:
+        route.append(rounded)
+
+
+def build_coverage_route(
+    polygon: list[list[float]],
+    start: Optional[list[float]] = None,
+) -> list[list[float]]:
+    current = start or _dock_approach_point(polygon)
+    remaining = _build_coverage_segments(polygon)
+    route: list[list[float]] = []
+
+    while remaining:
+        best_index = None
+        best_oriented_segment = None
+        best_distance = None
+
+        for index, segment in enumerate(remaining):
+            for oriented_segment in (segment, (segment[1], segment[0])):
+                connector_start = oriented_segment[0]
+
+                if not _segment_stays_in_polygon(
+                    current,
+                    connector_start,
+                    polygon,
+                ):
+                    continue
+
+                connector_distance = _distance(current, connector_start)
+
+                if best_distance is None or connector_distance < best_distance:
+                    best_index = index
+                    best_oriented_segment = oriented_segment
+                    best_distance = connector_distance
+
+        if best_index is None or best_oriented_segment is None:
+            raise ValueError("Cleaning route has disconnected areas")
+
+        _append_route_point(route, best_oriented_segment[0])
+        _append_route_point(route, best_oriented_segment[1])
+        current = best_oriented_segment[1]
+        remaining.pop(best_index)
+
+    if route:
+        return route
+
+    centroid = _polygon_centroid(polygon)
+    rounded = _round_point(centroid)
+
+    if _point_in_polygon(rounded, polygon):
+        return [rounded]
+
+    raise ValueError("No cleaning route could be generated")
 
 
 def build_safe_cleaning_route(
@@ -418,7 +578,9 @@ def build_safe_cleaning_route(
 ) -> list[list[float]]:
     validate_cleaning_polygon(polygon)
 
-    route = build_coverage_route(polygon)
+    undock = _undock_point(polygon)
+    approach = _dock_approach_point(polygon)
+    route = [undock, approach] + build_coverage_route(polygon, approach)
 
     if not route:
         raise ValueError("No cleaning route could be generated")
@@ -429,7 +591,7 @@ def build_safe_cleaning_route(
     for point in route:
         rounded = _round_point(point)
 
-        if not _point_in_polygon(rounded, polygon):
+        if not _point_in_or_on_polygon(rounded, polygon):
             continue
 
         if _distance(current, rounded) > MAX_CLEANING_SEGMENT_MM:
@@ -447,10 +609,20 @@ def build_safe_cleaning_route(
     if len(safe_route) > MAX_CLEANING_ROUTE_POINTS:
         raise ValueError("Cleaning route is too large")
 
-    if not _segment_stays_in_polygon(safe_route[0], [0.0, 0.0], polygon):
-        raise ValueError("Room path from dock is not inside the map")
-
     return safe_route
+
+
+def build_cleaning_preview_route(
+    polygon: list[list[float]],
+) -> list[list[float]]:
+    route = build_safe_cleaning_route(polygon)
+
+    return (
+        [[0.0, 0.0]]
+        + route
+        + list(reversed(route[1:-1]))
+        + [[0.0, 0.0]]
+    )
 
 
 def validate_cleaning_polygon(polygon: list[list[float]]) -> None:
@@ -770,19 +942,23 @@ class AutonomousCleaner:
             raise RuntimeError("Autonomous heartbeat lost")
 
     def start(self, room_ids: list[str]) -> dict[str, Any]:
-        rooms = self.room_store.get_rooms(room_ids)
-
         if not room_ids:
             raise ValueError("Select at least one room")
 
+        if len(room_ids) > 1:
+            raise ValueError("Clean one room at a time from the dock")
+
+        rooms = self.room_store.get_rooms(room_ids)
         room_routes = []
 
         for room in rooms:
             room_routes.append((room, build_safe_cleaning_route(room["points"])))
 
         with self.lock:
-            if self.status_data["state"] == "running":
-                raise ValueError("Autonomous cleaning is already running")
+            if self.status_data["state"] in {"running", "docking"}:
+                raise ValueError(
+                    "Stop the current Roomba action before cleaning"
+                )
 
             self.cancel_event.clear()
             self.last_heartbeat = time.monotonic()
@@ -840,12 +1016,16 @@ class AutonomousCleaner:
         started_at = time.monotonic()
 
         try:
-            self.roomba.vacuum_on()
+            self.roomba.vacuum_off()
 
             for room, route in room_routes:
                 self._set_status("running", "Cleaning", room["name"])
+                undock_point = route[0]
+                dock_approach = route[1]
 
-                for point in route:
+                self._back_off_dock(undock_point, room["name"])
+
+                for point in route[1:]:
                     self._check_heartbeat()
                     self._check_runtime(started_at)
                     self._drive_to(point, room["points"], room["name"])
@@ -853,16 +1033,20 @@ class AutonomousCleaner:
                     if self.cancel_event.is_set():
                         raise RuntimeError("Cleaning cancelled")
 
-                for point in reversed(route[:-1]):
+                for point in reversed(route[1:-1]):
                     self._check_heartbeat()
                     self._check_runtime(started_at)
                     self._drive_to(point, room["points"], room["name"])
 
-                self._check_heartbeat()
-                self._drive_to([0.0, 0.0], room["points"], room["name"])
+                self.pose["x"] = dock_approach[0]
+                self.pose["y"] = dock_approach[1]
+                self._face_point([0.0, 0.0], room["name"])
+                self.pose["x"] = dock_approach[0]
+                self.pose["y"] = dock_approach[1]
 
             self.roomba.vacuum_off()
             self._set_status("docking", "Returning to dock", None)
+            self.roomba.stop()
             self.roomba.seek_dock()
             self.pose = {"x": 0.0, "y": 0.0, "theta": 0.0}
             self.room_store.reset_pose_to_dock()
@@ -927,6 +1111,69 @@ class AutonomousCleaner:
             if self.cancel_event.is_set():
                 raise RuntimeError("Cleaning cancelled")
 
+    def _back_off_dock(
+        self,
+        undock_point: list[float],
+        room_name: Optional[str],
+    ) -> None:
+        if abs(undock_point[0]) > 1 or undock_point[1] >= 0:
+            raise RuntimeError("Cleaning route does not start behind the dock")
+
+        self.pose = {"x": 0.0, "y": 0.0, "theta": 0.0}
+        self._set_status("running", "Backing off dock", room_name)
+
+        reverse_distance = abs(undock_point[1])
+        speed = AUTONOMOUS_STRAIGHT_SPEED_MM_S
+
+        self._move_for(
+            -speed,
+            -speed,
+            reverse_distance / speed,
+            room_name,
+            target_distance=reverse_distance,
+            status_message="Backing off dock",
+        )
+
+        self.pose["x"] = undock_point[0]
+        self.pose["y"] = undock_point[1]
+        self.pose["theta"] = 0.0
+        self._set_status("running", "Cleaning", room_name)
+
+    def _face_point(
+        self,
+        target: list[float],
+        room_name: Optional[str],
+    ) -> None:
+        self._set_status("running", "Facing dock", room_name)
+
+        while True:
+            self._check_heartbeat()
+
+            dx = target[0] - self.pose["x"]
+            dy = target[1] - self.pose["y"]
+
+            if math.hypot(dx, dy) <= 1:
+                return
+
+            desired_heading = math.atan2(dx, dy)
+            turn_angle = _normalize_angle(
+                desired_heading - self.pose["theta"]
+            )
+
+            if abs(turn_angle) <= AUTONOMOUS_HEADING_TOLERANCE_RAD:
+                self.pose["theta"] = desired_heading
+                self._set_status("running", "Dock handoff", room_name)
+                return
+
+            turn_chunk = math.copysign(
+                min(abs(turn_angle), AUTONOMOUS_TURN_CHUNK_RAD),
+                turn_angle,
+            )
+            self._turn(turn_chunk, room_name)
+
+            if self.cancel_event.is_set():
+                raise RuntimeError("Cleaning cancelled")
+
     def _turn(self, angle: float, room_name: Optional[str]) -> None:
         speed = AUTONOMOUS_TURN_SPEED_MM_S
         left = speed if angle > 0 else -speed
@@ -965,6 +1212,7 @@ class AutonomousCleaner:
         room_name: Optional[str],
         target_distance: Optional[float] = None,
         target_angle: Optional[float] = None,
+        status_message: str = "Cleaning",
     ) -> None:
         start = time.monotonic()
         last_update = start
@@ -1029,7 +1277,7 @@ class AutonomousCleaner:
             if target_angle is not None and measured_angle >= target_angle:
                 break
 
-            self._set_status("running", "Cleaning", room_name)
+            self._set_status("running", status_message, room_name)
 
             if self.cancel_event.is_set():
                 raise RuntimeError("Cleaning cancelled")
@@ -1039,7 +1287,7 @@ class AutonomousCleaner:
             time.sleep(AUTONOMOUS_COMMAND_INTERVAL_SECONDS)
 
         self.roomba.stop()
-        self._set_status("running", "Cleaning", room_name)
+        self._set_status("running", status_message, room_name)
 
     def _clear_motion_sensors(self) -> bool:
         try:
