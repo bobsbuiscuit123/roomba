@@ -20,7 +20,10 @@ def start_page():
 def start_roomba():
     global roomba_started
 
+    cleaner.stop()
+    room_map.cancel_mapping()
     roomba.start()
+    roomba.stop()
     roomba_started = True
 
     return jsonify({
@@ -72,6 +75,12 @@ def drive():
             "error": "Invalid wheel speeds",
         }), 400
 
+    if cleaner.status()["state"] == "running" and (left != 0 or right != 0):
+        return jsonify({
+            "ok": False,
+            "error": "Autonomous cleaning is using the wheels",
+        }), 409
+
     left = max(-roomba.speed, min(roomba.speed, left))
     right = max(-roomba.speed, min(roomba.speed, right))
 
@@ -92,6 +101,7 @@ def drive():
 def stop():
     room_map.record_drive(0, 0)
     roomba.stop()
+    cleaner.reset_to_idle()
     return jsonify({"ok": True})
 
 
@@ -314,6 +324,20 @@ def clean_stop():
     })
 
 
+@app.post("/clean/heartbeat")
+def clean_heartbeat():
+    if not roomba_started:
+        return jsonify({
+            "ok": False,
+            "error": "Start the Roomba first",
+        }), 409
+
+    return jsonify({
+        "ok": True,
+        "cleaning": cleaner.heartbeat(),
+    })
+
+
 @app.post("/dock")
 def dock():
     if not roomba_started:
@@ -322,11 +346,45 @@ def dock():
             "error": "Start the Roomba first",
         }), 409
 
+    data = request.get_json(silent=True) or {}
+
+    if room_map.state()["mapping"]["active"]:
+        room_map.record_drive(0, 0)
+        roomba.stop()
+
+        return jsonify({
+            "ok": False,
+            "error": "Finish or cancel mapping before docking",
+        }), 409
+
+    if data.get("confirm") is not True:
+        roomba.stop()
+        cleaner.reset_to_idle()
+
+        return jsonify({
+            "ok": False,
+            "error": "Docking must be confirmed",
+        }), 400
+
+    cleaner.stop()
     status = cleaner.send_to_dock()
 
     return jsonify({
         "ok": True,
         "cleaning": status,
+    })
+
+
+@app.post("/safety/stop")
+def safety_stop():
+    room_map.record_drive(0, 0)
+    room_map.cancel_mapping()
+    cleaner.stop()
+    roomba.stop()
+
+    return jsonify({
+        "ok": True,
+        "cleaning": cleaner.status(),
     })
 
 

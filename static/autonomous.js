@@ -43,6 +43,7 @@ let selectedRoomIds = new Set();
 const SEND_INTERVAL_MS = 60;
 const SMOOTHING = 0.22;
 const DEAD_ZONE = 0.06;
+const AUTONOMOUS_DRIVING_ENABLED = true;
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const ROOM_COLORS = [
@@ -274,6 +275,30 @@ async function postJson(path, body) {
 }
 
 
+function sendSafetyStop() {
+    resetDriveControls();
+
+    if (navigator.sendBeacon) {
+        const body = new Blob(
+            [JSON.stringify({})],
+            {
+                type: "application/json"
+            }
+        );
+
+        navigator.sendBeacon("/safety/stop", body);
+        return;
+    }
+
+    fetch("/safety/stop", {
+        method: "POST",
+        keepalive: true
+    }).catch((error) => {
+        console.error(error);
+    });
+}
+
+
 async function deleteJson(path) {
     const response = await fetch(path, {
         method: "DELETE"
@@ -401,11 +426,7 @@ async function emergencyStop() {
     resetDriveControls();
 
     try {
-        await fetch("/stop", {
-            method: "POST"
-        });
-
-        await fetch("/clean/stop", {
+        await fetch("/safety/stop", {
             method: "POST"
         });
 
@@ -413,6 +434,21 @@ async function emergencyStop() {
         await refreshState();
     } catch (error) {
         autoStatus.textContent = "Stop request failed";
+        console.error(error);
+    }
+}
+
+
+async function sendCleaningHeartbeat() {
+    if (currentCleaningState !== "running") {
+        return;
+    }
+
+    try {
+        await postJson("/clean/heartbeat");
+    } catch (error) {
+        autoStatus.textContent = "Heartbeat lost; stopping";
+        sendSafetyStop();
         console.error(error);
     }
 }
@@ -678,8 +714,15 @@ function applyState(data) {
     backAtDockButton.disabled = !mappingActive;
     saveRoomButton.disabled = !mappingClosed;
     cancelMappingButton.disabled = !(mappingActive || mappingClosed);
+
     startCleanButton.disabled =
-        rooms.length === 0 || currentCleaningState === "running";
+        !AUTONOMOUS_DRIVING_ENABLED
+        || rooms.length === 0
+        || currentCleaningState === "running";
+
+    startCleanButton.textContent = AUTONOMOUS_DRIVING_ENABLED
+        ? "Clean Selected"
+        : "Clean Disabled";
 
     dockNowButton.disabled = mappingActive;
 
@@ -755,6 +798,23 @@ cancelMappingButton.addEventListener("click", async () => {
 
 
 startCleanButton.addEventListener("click", async () => {
+    if (!AUTONOMOUS_DRIVING_ENABLED) {
+        autoStatus.textContent =
+            "Autonomous driving needs localization first";
+        return;
+    }
+
+    const roomCount = selectedRoomIds.size;
+
+    const confirmed = window.confirm(
+        `Start autonomous cleaning for ${roomCount} selected room(s)? Keep this page open.`
+    );
+
+    if (!confirmed) {
+        autoStatus.textContent = "Cleaning cancelled";
+        return;
+    }
+
     try {
         const data = await postJson("/clean/start", {
             rooms: Array.from(selectedRoomIds)
@@ -770,9 +830,20 @@ startCleanButton.addEventListener("click", async () => {
 
 
 dockNowButton.addEventListener("click", async () => {
+    const confirmed = window.confirm(
+        "Send the Roomba built-in dock command? It can move on its own."
+    );
+
+    if (!confirmed) {
+        autoStatus.textContent = "Dock cancelled";
+        return;
+    }
+
     try {
         resetDriveControls();
-        const data = await postJson("/dock");
+        const data = await postJson("/dock", {
+            confirm: true
+        });
         autoStatus.textContent = data.cleaning.message;
         await refreshState();
     } catch (error) {
@@ -810,15 +881,19 @@ speedSlider.addEventListener("change", async () => {
 
 
 window.addEventListener("blur", () => {
-    if (mappingActive) {
+    if (mappingActive || currentCleaningState === "running") {
         emergencyStop();
     }
 });
 
 
 window.addEventListener("pagehide", () => {
-    if (mappingActive) {
-        emergencyStop();
+    if (
+        mappingActive
+        || currentCleaningState === "running"
+        || currentCleaningState === "docking"
+    ) {
+        sendSafetyStop();
     }
 });
 
@@ -826,7 +901,14 @@ window.addEventListener("pagehide", () => {
 document.addEventListener(
     "visibilitychange",
     () => {
-        if (document.hidden && mappingActive) {
+        if (
+            document.hidden
+            && (
+                mappingActive
+                || currentCleaningState === "running"
+                || currentCleaningState === "docking"
+            )
+        ) {
             emergencyStop();
         }
     }
@@ -834,6 +916,8 @@ document.addEventListener(
 
 
 setInterval(() => {
+    sendCleaningHeartbeat();
+
     refreshState().catch((error) => {
         autoStatus.textContent = error.message;
         console.error(error);

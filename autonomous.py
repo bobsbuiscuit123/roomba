@@ -11,6 +11,16 @@ from typing import Any, Optional
 WHEEL_BASE_MM = 235.0
 MIN_POINT_SPACING_MM = 80.0
 MIN_ROOM_AREA_MM2 = 20_000.0
+MAX_DOCK_RETURN_DRIFT_MM = 900.0
+COVERAGE_SPACING_MM = 360.0
+COVERAGE_EDGE_MARGIN_MM = 180.0
+MAX_CLEANING_ROOM_SPAN_MM = 8_000.0
+MAX_CLEANING_ROOM_AREA_MM2 = 60_000_000.0
+MAX_CLEANING_ROUTE_POINTS = 220
+MAX_CLEANING_SEGMENT_MM = 6_000.0
+MAX_CLEANING_DURATION_SECONDS = 20 * 60
+AUTONOMOUS_HEARTBEAT_TIMEOUT_SECONDS = 2.5
+AUTONOMOUS_COMMAND_INTERVAL_SECONDS = 0.08
 
 
 def _now_iso() -> str:
@@ -173,6 +183,38 @@ def _point_in_polygon(
     return inside
 
 
+def _point_in_or_on_polygon(
+    point: list[float],
+    polygon: list[list[float]],
+) -> bool:
+    return _point_on_boundary(point, polygon) or _point_in_polygon(
+        point,
+        polygon,
+    )
+
+
+def _segment_stays_in_polygon(
+    start: list[float],
+    end: list[float],
+    polygon: list[list[float]],
+    spacing_mm: float = 120.0,
+) -> bool:
+    segment_length = _distance(start, end)
+    sample_count = max(2, math.ceil(segment_length / spacing_mm))
+
+    for index in range(sample_count + 1):
+        ratio = index / sample_count
+        point = [
+            start[0] + (end[0] - start[0]) * ratio,
+            start[1] + (end[1] - start[1]) * ratio,
+        ]
+
+        if not _point_in_or_on_polygon(point, polygon):
+            return False
+
+    return True
+
+
 def _polygons_overlap(
     first: list[list[float]],
     second: list[list[float]],
@@ -286,7 +328,8 @@ def _line_polygon_intersections(
 
 def build_coverage_route(
     polygon: list[list[float]],
-    spacing_mm: float = 320.0,
+    spacing_mm: float = COVERAGE_SPACING_MM,
+    edge_margin_mm: float = COVERAGE_EDGE_MARGIN_MM,
 ) -> list[list[float]]:
     room_bounds = _bounds(polygon)
     y_value = room_bounds["min_y"] + spacing_mm / 2
@@ -297,8 +340,20 @@ def build_coverage_route(
         intersections = _line_polygon_intersections(polygon, y_value)
 
         for index in range(0, len(intersections) - 1, 2):
-            first = [intersections[index], y_value]
-            second = [intersections[index + 1], y_value]
+            first_x = intersections[index]
+            second_x = intersections[index + 1]
+            span_width = second_x - first_x
+
+            if span_width < edge_margin_mm:
+                continue
+
+            if span_width > edge_margin_mm * 2:
+                first = [first_x + edge_margin_mm, y_value]
+                second = [second_x - edge_margin_mm, y_value]
+            else:
+                center = (first_x + second_x) / 2
+                first = [center, y_value]
+                second = [center, y_value]
 
             if left_to_right:
                 route.extend([first, second])
@@ -315,6 +370,78 @@ def build_coverage_route(
     x_center = (room_bounds["min_x"] + room_bounds["max_x"]) / 2
     y_center = (room_bounds["min_y"] + room_bounds["max_y"]) / 2
     return [[round(x_center, 1), round(y_center, 1)]]
+
+
+def build_safe_cleaning_route(
+    polygon: list[list[float]],
+) -> list[list[float]]:
+    validate_cleaning_polygon(polygon)
+
+    route = build_coverage_route(polygon)
+
+    if not route:
+        raise ValueError("No cleaning route could be generated")
+
+    safe_route: list[list[float]] = []
+    current = [0.0, 0.0]
+
+    for point in route:
+        rounded = _round_point(point)
+
+        if not _point_in_polygon(rounded, polygon):
+            continue
+
+        if _distance(current, rounded) > MAX_CLEANING_SEGMENT_MM:
+            raise ValueError("Cleaning route has an unsafe long segment")
+
+        if not _segment_stays_in_polygon(current, rounded, polygon):
+            raise ValueError("Cleaning route would leave the mapped room")
+
+        safe_route.append(rounded)
+        current = rounded
+
+    if not safe_route:
+        raise ValueError("No safe route points are inside the room")
+
+    if len(safe_route) > MAX_CLEANING_ROUTE_POINTS:
+        raise ValueError("Cleaning route is too large")
+
+    if not _segment_stays_in_polygon(safe_route[0], [0.0, 0.0], polygon):
+        raise ValueError("Room path from dock is not inside the map")
+
+    return safe_route
+
+
+def validate_cleaning_polygon(polygon: list[list[float]]) -> None:
+    if len(polygon) < 4:
+        raise ValueError("Room map is incomplete")
+
+    if not _same_point(polygon[0], polygon[-1]):
+        raise ValueError("Room map is not closed")
+
+    if not _point_in_or_on_polygon([0.0, 0.0], polygon):
+        raise ValueError("Room map does not include the dock")
+
+    if _self_intersects(polygon):
+        raise ValueError("Room map crosses itself")
+
+    area = _polygon_area(polygon)
+
+    if area < MIN_ROOM_AREA_MM2:
+        raise ValueError("Room map is too small")
+
+    if area > MAX_CLEANING_ROOM_AREA_MM2:
+        raise ValueError("Room map is too large")
+
+    room_bounds = _bounds(polygon)
+
+    if (
+        room_bounds["max_x"] - room_bounds["min_x"]
+        > MAX_CLEANING_ROOM_SPAN_MM
+        or room_bounds["max_y"] - room_bounds["min_y"]
+        > MAX_CLEANING_ROOM_SPAN_MM
+    ):
+        raise ValueError("Room map span is too large")
 
 
 class RoomMapStore:
@@ -416,6 +543,17 @@ class RoomMapStore:
             )
 
             drift = _distance(_pose_point(self.mapping["pose"]), [0.0, 0.0])
+
+            if drift > MAX_DOCK_RETURN_DRIFT_MM:
+                self.mapping["last_left"] = 0.0
+                self.mapping["last_right"] = 0.0
+
+                raise ValueError(
+                    "Map rejected: estimated return point is "
+                    + str(round(drift))
+                    + " mm from the dock"
+                )
+
             path = list(self.mapping["path"])
             path.append(_pose_point(self.mapping["pose"]))
             path.append([0.0, 0.0])
@@ -543,6 +681,7 @@ class AutonomousCleaner:
         self.cancel_event = threading.Event()
         self.thread: Optional[threading.Thread] = None
         self.pose = {"x": 0.0, "y": 0.0, "theta": 0.0}
+        self.last_heartbeat = time.monotonic()
         self.status_data: dict[str, Any] = {
             "state": "idle",
             "message": "Ready",
@@ -589,21 +728,39 @@ class AutonomousCleaner:
                 "pose": self._public_pose(),
             }
 
+    def heartbeat(self) -> dict[str, Any]:
+        with self.lock:
+            self.last_heartbeat = time.monotonic()
+            return dict(self.status_data)
+
+    def _check_heartbeat(self) -> None:
+        if (
+            time.monotonic() - self.last_heartbeat
+            > AUTONOMOUS_HEARTBEAT_TIMEOUT_SECONDS
+        ):
+            raise RuntimeError("Autonomous heartbeat lost")
+
     def start(self, room_ids: list[str]) -> dict[str, Any]:
         rooms = self.room_store.get_rooms(room_ids)
 
-        if not rooms:
+        if not room_ids:
             raise ValueError("Select at least one room")
+
+        room_routes = []
+
+        for room in rooms:
+            room_routes.append((room, build_safe_cleaning_route(room["points"])))
 
         with self.lock:
             if self.status_data["state"] == "running":
                 raise ValueError("Autonomous cleaning is already running")
 
             self.cancel_event.clear()
+            self.last_heartbeat = time.monotonic()
             self.pose = {"x": 0.0, "y": 0.0, "theta": 0.0}
             self.thread = threading.Thread(
                 target=self._run,
-                args=(rooms,),
+                args=(room_routes,),
                 daemon=True,
             )
             self.status_data = {
@@ -640,25 +797,40 @@ class AutonomousCleaner:
         self._set_status("docking", "Docking command sent", None)
         return self.status()
 
-    def _run(self, rooms: list[dict[str, Any]]) -> None:
+    def reset_to_idle(self) -> dict[str, Any]:
+        self.cancel_event.set()
+        self.pose = {"x": 0.0, "y": 0.0, "theta": 0.0}
+        self.room_store.reset_pose_to_dock()
+        self._set_status("idle", "Ready", None)
+        return self.status()
+
+    def _run(self, room_routes: list[tuple[dict[str, Any], list[list[float]]]]) -> None:
+        started_at = time.monotonic()
+
         try:
             self.roomba.vacuum_on()
 
-            for room in rooms:
+            for room, route in room_routes:
                 self._set_status("running", "Cleaning", room["name"])
-                route = build_coverage_route(room["points"])
 
                 for point in route:
+                    self._check_heartbeat()
+                    self._check_runtime(started_at)
                     self._drive_to(point, room["name"])
 
                     if self.cancel_event.is_set():
                         raise RuntimeError("Cleaning cancelled")
 
+                for point in reversed(route[:-1]):
+                    self._check_heartbeat()
+                    self._check_runtime(started_at)
+                    self._drive_to(point, room["name"])
+
+                self._check_heartbeat()
                 self._drive_to([0.0, 0.0], room["name"])
 
             self.roomba.vacuum_off()
             self._set_status("docking", "Returning to dock", None)
-            self._drive_to([0.0, 0.0], None)
             self.roomba.seek_dock()
             self.pose = {"x": 0.0, "y": 0.0, "theta": 0.0}
             self.room_store.reset_pose_to_dock()
@@ -671,6 +843,10 @@ class AutonomousCleaner:
             self.roomba.stop()
             self.roomba.vacuum_off()
             self._set_status("error", str(error), None)
+
+    def _check_runtime(self, started_at: float) -> None:
+        if time.monotonic() - started_at > MAX_CLEANING_DURATION_SECONDS:
+            raise RuntimeError("Autonomous runtime limit reached")
 
     def _drive_to(
         self,
@@ -724,6 +900,8 @@ class AutonomousCleaner:
             if self.cancel_event.is_set():
                 raise RuntimeError("Cleaning cancelled")
 
+            self._check_heartbeat()
+
             now = time.monotonic()
             elapsed = now - start
 
@@ -748,7 +926,7 @@ class AutonomousCleaner:
 
             self.roomba.drive_wheels(right_speed=right, left_speed=left)
             last_update = now
-            time.sleep(0.08)
+            time.sleep(AUTONOMOUS_COMMAND_INTERVAL_SECONDS)
 
         remaining = max(duration - (last_update - start), 0.0)
 
