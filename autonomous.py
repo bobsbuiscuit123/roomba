@@ -11,7 +11,6 @@ from typing import Any, Optional
 WHEEL_BASE_MM = 235.0
 MIN_POINT_SPACING_MM = 80.0
 MIN_ROOM_AREA_MM2 = 20_000.0
-MAX_DOCK_RETURN_DRIFT_MM = 900.0
 COVERAGE_SPACING_MM = 360.0
 COVERAGE_EDGE_MARGIN_MM = 180.0
 MAX_CLEANING_ROOM_SPAN_MM = 8_000.0
@@ -281,6 +280,27 @@ def _thin_path(points: list[list[float]]) -> list[list[float]]:
     return thinned
 
 
+def _loop_close_path(points: list[list[float]]) -> list[list[float]]:
+    if len(points) < 2:
+        return [[0.0, 0.0], [0.0, 0.0]]
+
+    drift = points[-1]
+    last_index = len(points) - 1
+    corrected = []
+
+    for index, point in enumerate(points):
+        correction_ratio = index / last_index
+        corrected.append([
+            point[0] - drift[0] * correction_ratio,
+            point[1] - drift[1] * correction_ratio,
+        ])
+
+    corrected[0] = [0.0, 0.0]
+    corrected[-1] = [0.0, 0.0]
+
+    return corrected
+
+
 def _integrate_pose(
     pose: dict[str, float],
     left_speed: float,
@@ -543,21 +563,9 @@ class RoomMapStore:
             )
 
             drift = _distance(_pose_point(self.mapping["pose"]), [0.0, 0.0])
-
-            if drift > MAX_DOCK_RETURN_DRIFT_MM:
-                self.mapping["last_left"] = 0.0
-                self.mapping["last_right"] = 0.0
-
-                raise ValueError(
-                    "Map rejected: estimated return point is "
-                    + str(round(drift))
-                    + " mm from the dock"
-                )
-
             path = list(self.mapping["path"])
             path.append(_pose_point(self.mapping["pose"]))
-            path.append([0.0, 0.0])
-            draft_points = _thin_path(path)
+            draft_points = _thin_path(_loop_close_path(path))
 
             if len(draft_points) < 4:
                 raise ValueError("Drive around the room edge before saving")
