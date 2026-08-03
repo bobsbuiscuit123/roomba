@@ -21,6 +21,46 @@ class RoombaController:
             self.serial.write(bytes(command))
             self.serial.flush()
 
+    def _query_list(
+        self,
+        packet_ids: list[int],
+        byte_count: int,
+        timeout: float = 0.12,
+    ) -> bytes:
+        with self.lock:
+            previous_timeout = self.serial.timeout
+
+            try:
+                self.serial.timeout = timeout
+                self.serial.reset_input_buffer()
+                self.serial.write(bytes([149, len(packet_ids)] + packet_ids))
+                self.serial.flush()
+                data = self.serial.read(byte_count)
+            finally:
+                self.serial.timeout = previous_timeout
+
+        if len(data) != byte_count:
+            raise TimeoutError("Roomba sensor query timed out")
+
+        return data
+
+    def read_distance_angle(self) -> tuple[int, int]:
+        data = self._query_list([19, 20], 4)
+
+        distance = int.from_bytes(
+            data[0:2],
+            byteorder="big",
+            signed=True,
+        )
+
+        angle = int.from_bytes(
+            data[2:4],
+            byteorder="big",
+            signed=True,
+        )
+
+        return distance, angle
+
     def start(self) -> None:
         self._send([128])
         time.sleep(0.12)

@@ -481,6 +481,8 @@ function roomAreaLabel(areaMm2) {
 function renderMap(data) {
     const rooms = data.rooms || [];
     const mapping = data.mapping || {};
+    const cleaning = data.cleaning || {};
+    const routes = data.routes || {};
     const activePath = mapping.active
         ? mapping.path || []
         : mapping.draft_points || [];
@@ -492,6 +494,12 @@ function renderMap(data) {
     });
 
     activePath.forEach((point) => allPoints.push(point));
+
+    Object.entries(routes).forEach(([roomId, route]) => {
+        if (selectedRoomIds.has(roomId)) {
+            route.forEach((point) => allPoints.push(point));
+        }
+    });
 
     let minX = Math.min(...allPoints.map((point) => point[0]));
     let maxX = Math.max(...allPoints.map((point) => point[0]));
@@ -534,6 +542,25 @@ function renderMap(data) {
         mapView.appendChild(polygon);
     });
 
+    Object.entries(routes).forEach(([roomId, route]) => {
+        if (!selectedRoomIds.has(roomId) || route.length < 2) {
+            return;
+        }
+
+        const routeLine = createSvgElement("polyline", {
+            points: pointString(route),
+            fill: "none",
+            stroke: "#ef4444",
+            "stroke-width": "20",
+            "stroke-linecap": "round",
+            "stroke-linejoin": "round",
+            "stroke-dasharray": "52 32",
+            opacity: "0.92"
+        });
+
+        mapView.appendChild(routeLine);
+    });
+
     if (activePath.length > 1) {
         const path = createSvgElement(
             mapping.active ? "polyline" : "polygon",
@@ -563,6 +590,19 @@ function renderMap(data) {
         });
 
         mapView.appendChild(pose);
+    }
+
+    if (cleaning.pose && cleaning.state === "running") {
+        const cleanerPose = createSvgElement("circle", {
+            cx: cleaning.pose.x,
+            cy: -cleaning.pose.y,
+            r: "44",
+            fill: "#ef4444",
+            stroke: "#111827",
+            "stroke-width": "14"
+        });
+
+        mapView.appendChild(cleanerPose);
     }
 
     const dockRing = createSvgElement("circle", {

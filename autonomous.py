@@ -20,6 +20,13 @@ MAX_CLEANING_SEGMENT_MM = 6_000.0
 MAX_CLEANING_DURATION_SECONDS = 20 * 60
 AUTONOMOUS_HEARTBEAT_TIMEOUT_SECONDS = 2.5
 AUTONOMOUS_COMMAND_INTERVAL_SECONDS = 0.08
+AUTONOMOUS_STRAIGHT_SPEED_MM_S = 85
+AUTONOMOUS_TURN_SPEED_MM_S = 70
+AUTONOMOUS_STRAIGHT_CHUNK_MM = 120
+AUTONOMOUS_TURN_CHUNK_RAD = 0.28
+AUTONOMOUS_WAYPOINT_TOLERANCE_MM = 90
+AUTONOMOUS_HEADING_TOLERANCE_RAD = 0.08
+SENSORLESS_TIME_LIMIT_MULTIPLIER = 1.55
 
 
 def _now_iso() -> str:
@@ -320,6 +327,20 @@ def _integrate_pose(
     pose["theta"] = _normalize_angle(
         pose["theta"] + angular_velocity * duration
     )
+
+
+def _integrate_distance_angle(
+    pose: dict[str, float],
+    distance_mm: float,
+    angle_degrees: float,
+) -> None:
+    # Roomba OI reports counter-clockwise positive. This map uses clockwise positive.
+    angle = -math.radians(angle_degrees)
+    mid_heading = pose["theta"] + angle / 2
+
+    pose["x"] += distance_mm * math.sin(mid_heading)
+    pose["y"] += distance_mm * math.cos(mid_heading)
+    pose["theta"] = _normalize_angle(pose["theta"] + angle)
 
 
 def _line_polygon_intersections(
@@ -812,7 +833,10 @@ class AutonomousCleaner:
         self._set_status("idle", "Ready", None)
         return self.status()
 
-    def _run(self, room_routes: list[tuple[dict[str, Any], list[list[float]]]]) -> None:
+    def _run(
+        self,
+        room_routes: list[tuple[dict[str, Any], list[list[float]]]],
+    ) -> None:
         started_at = time.monotonic()
 
         try:
@@ -824,7 +848,7 @@ class AutonomousCleaner:
                 for point in route:
                     self._check_heartbeat()
                     self._check_runtime(started_at)
-                    self._drive_to(point, room["name"])
+                    self._drive_to(point, room["points"], room["name"])
 
                     if self.cancel_event.is_set():
                         raise RuntimeError("Cleaning cancelled")
@@ -832,10 +856,10 @@ class AutonomousCleaner:
                 for point in reversed(route[:-1]):
                     self._check_heartbeat()
                     self._check_runtime(started_at)
-                    self._drive_to(point, room["name"])
+                    self._drive_to(point, room["points"], room["name"])
 
                 self._check_heartbeat()
-                self._drive_to([0.0, 0.0], room["name"])
+                self._drive_to([0.0, 0.0], room["points"], room["name"])
 
             self.roomba.vacuum_off()
             self._set_status("docking", "Returning to dock", None)
@@ -859,40 +883,79 @@ class AutonomousCleaner:
     def _drive_to(
         self,
         target: list[float],
+        polygon: list[list[float]],
         room_name: Optional[str],
     ) -> None:
-        dx = target[0] - self.pose["x"]
-        dy = target[1] - self.pose["y"]
-        distance = math.hypot(dx, dy)
+        while True:
+            self._check_heartbeat()
 
-        if distance < 60:
-            return
+            dx = target[0] - self.pose["x"]
+            dy = target[1] - self.pose["y"]
+            distance = math.hypot(dx, dy)
 
-        desired_heading = math.atan2(dx, dy)
-        turn_angle = _normalize_angle(desired_heading - self.pose["theta"])
+            if distance < AUTONOMOUS_WAYPOINT_TOLERANCE_MM:
+                return
 
-        if abs(turn_angle) > 0.05:
-            self._turn(turn_angle, room_name)
+            desired_heading = math.atan2(dx, dy)
+            turn_angle = _normalize_angle(
+                desired_heading - self.pose["theta"]
+            )
 
-        self._drive_straight(distance, room_name)
+            if abs(turn_angle) > AUTONOMOUS_HEADING_TOLERANCE_RAD:
+                turn_chunk = math.copysign(
+                    min(abs(turn_angle), AUTONOMOUS_TURN_CHUNK_RAD),
+                    turn_angle,
+                )
+                self._turn(turn_chunk, room_name)
+                continue
+
+            step_distance = min(distance, AUTONOMOUS_STRAIGHT_CHUNK_MM)
+            projected = [
+                self.pose["x"] + step_distance * math.sin(self.pose["theta"]),
+                self.pose["y"] + step_distance * math.cos(self.pose["theta"]),
+            ]
+
+            if not _segment_stays_in_polygon(
+                [self.pose["x"], self.pose["y"]],
+                projected,
+                polygon,
+            ):
+                raise RuntimeError("Stopping before leaving mapped room")
+
+            self._drive_straight(step_distance, room_name)
+
+            if self.cancel_event.is_set():
+                raise RuntimeError("Cleaning cancelled")
 
     def _turn(self, angle: float, room_name: Optional[str]) -> None:
-        speed = 95
+        speed = AUTONOMOUS_TURN_SPEED_MM_S
         left = speed if angle > 0 else -speed
         right = -speed if angle > 0 else speed
         angular_speed = abs((left - right) / self.wheel_base_mm)
         duration = abs(angle) / angular_speed
 
-        self._move_for(left, right, duration, room_name)
+        self._move_for(
+            left,
+            right,
+            duration,
+            room_name,
+            target_angle=abs(angle),
+        )
 
     def _drive_straight(
         self,
         distance: float,
         room_name: Optional[str],
     ) -> None:
-        speed = 150
+        speed = AUTONOMOUS_STRAIGHT_SPEED_MM_S
         duration = distance / speed
-        self._move_for(speed, speed, duration, room_name)
+        self._move_for(
+            speed,
+            speed,
+            duration,
+            room_name,
+            target_distance=distance,
+        )
 
     def _move_for(
         self,
@@ -900,9 +963,15 @@ class AutonomousCleaner:
         right: int,
         duration: float,
         room_name: Optional[str],
+        target_distance: Optional[float] = None,
+        target_angle: Optional[float] = None,
     ) -> None:
         start = time.monotonic()
         last_update = start
+        measured_distance = 0.0
+        measured_angle = 0.0
+        sensor_ok = self._clear_motion_sensors()
+        max_duration = duration * SENSORLESS_TIME_LIMIT_MULTIPLIER + 0.35
 
         while True:
             if self.cancel_event.is_set():
@@ -913,12 +982,30 @@ class AutonomousCleaner:
             now = time.monotonic()
             elapsed = now - start
 
-            if elapsed >= duration:
+            if elapsed >= max_duration:
                 break
 
-            step = min(now - last_update, duration - elapsed)
+            if target_distance is not None and measured_distance >= target_distance:
+                break
 
-            if step > 0:
+            if target_angle is not None and measured_angle >= target_angle:
+                break
+
+            step = min(now - last_update, max_duration - elapsed)
+
+            sensor_delta = self._read_motion_delta()
+
+            if sensor_delta:
+                sensor_ok = True
+                distance_delta, angle_delta = sensor_delta
+                _integrate_distance_angle(
+                    self.pose,
+                    distance_delta,
+                    angle_delta,
+                )
+                measured_distance += abs(distance_delta)
+                measured_angle += abs(math.radians(angle_delta))
+            elif step > 0:
                 _integrate_pose(
                     self.pose,
                     left,
@@ -926,6 +1013,21 @@ class AutonomousCleaner:
                     step,
                     self.wheel_base_mm,
                 )
+
+                if not sensor_ok:
+                    if target_distance is not None:
+                        measured_distance += abs((left + right) / 2) * step
+
+                    if target_angle is not None:
+                        measured_angle += (
+                            abs((left - right) / self.wheel_base_mm) * step
+                        )
+
+            if target_distance is not None and measured_distance >= target_distance:
+                break
+
+            if target_angle is not None and measured_angle >= target_angle:
+                break
 
             self._set_status("running", "Cleaning", room_name)
 
@@ -936,16 +1038,18 @@ class AutonomousCleaner:
             last_update = now
             time.sleep(AUTONOMOUS_COMMAND_INTERVAL_SECONDS)
 
-        remaining = max(duration - (last_update - start), 0.0)
-
-        if remaining > 0:
-            _integrate_pose(
-                self.pose,
-                left,
-                right,
-                remaining,
-                self.wheel_base_mm,
-            )
-
         self.roomba.stop()
         self._set_status("running", "Cleaning", room_name)
+
+    def _clear_motion_sensors(self) -> bool:
+        try:
+            self.roomba.read_distance_angle()
+            return True
+        except Exception:
+            return False
+
+    def _read_motion_delta(self) -> Optional[tuple[int, int]]:
+        try:
+            return self.roomba.read_distance_angle()
+        except Exception:
+            return None

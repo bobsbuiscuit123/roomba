@@ -1,6 +1,6 @@
 from flask import Flask, jsonify, redirect, render_template, request, url_for
 
-from autonomous import AutonomousCleaner, RoomMapStore
+from autonomous import AutonomousCleaner, RoomMapStore, build_safe_cleaning_route
 from roomba import RoombaController
 
 
@@ -146,6 +146,23 @@ def autonomous_state():
         }), 409
 
     state = room_map.state()
+    routes = {}
+    route_errors = {}
+
+    for room in state["rooms"]:
+        try:
+            route = build_safe_cleaning_route(room["points"])
+            routes[room["id"]] = (
+                [[0.0, 0.0]]
+                + route
+                + list(reversed(route[:-1]))
+                + [[0.0, 0.0]]
+            )
+        except ValueError as error:
+            route_errors[room["id"]] = str(error)
+
+    state["routes"] = routes
+    state["route_errors"] = route_errors
     state["cleaning"] = cleaner.status()
     state["ok"] = True
 
