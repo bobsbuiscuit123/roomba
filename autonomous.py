@@ -1,5 +1,6 @@
 import json
 import math
+import os
 import threading
 import time
 import uuid
@@ -29,6 +30,18 @@ AUTONOMOUS_TURN_CHUNK_RAD = 0.28
 AUTONOMOUS_WAYPOINT_TOLERANCE_MM = 90
 AUTONOMOUS_HEADING_TOLERANCE_RAD = 0.08
 SENSORLESS_TIME_LIMIT_MULTIPLIER = 1.55
+ROOM_MAP_ENV_VAR = "ROOM_MAP_PATH"
+ROOM_MAP_DIR_NAME = ".roomba_web"
+ROOM_MAP_FILE_NAME = "room_map.json"
+
+
+def _default_room_map_path() -> Path:
+    configured_path = os.environ.get(ROOM_MAP_ENV_VAR)
+
+    if configured_path:
+        return Path(configured_path).expanduser()
+
+    return Path.home() / ROOM_MAP_DIR_NAME / ROOM_MAP_FILE_NAME
 
 
 def _now_iso() -> str:
@@ -659,10 +672,11 @@ def validate_cleaning_polygon(polygon: list[list[float]]) -> None:
 
 class RoomMapStore:
     def __init__(self, path: Optional[Path] = None) -> None:
-        self.path = path or Path(__file__).with_name("room_map.json")
+        self.path = (path or _default_room_map_path()).expanduser()
         self.lock = threading.Lock()
         self.rooms: list[dict[str, Any]] = []
         self.mapping: dict[str, Any] = self._empty_mapping()
+        self._prepare_storage()
         self.load()
 
     def _empty_mapping(self) -> dict[str, Any]:
@@ -678,6 +692,21 @@ class RoomMapStore:
             "draft_points": [],
             "warning": "",
         }
+
+    def _prepare_storage(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        legacy_path = Path(__file__).with_name(ROOM_MAP_FILE_NAME)
+
+        if self.path.resolve() == legacy_path.resolve():
+            return
+
+        if self.path.exists() or not legacy_path.exists():
+            return
+
+        self.path.write_text(
+            legacy_path.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
 
     def load(self) -> None:
         if not self.path.exists():
@@ -695,8 +724,14 @@ class RoomMapStore:
             "updated_at": _now_iso(),
         }
 
-        with self.path.open("w", encoding="utf-8") as file:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = self.path.with_name(self.path.name + ".tmp")
+
+        with temp_path.open("w", encoding="utf-8") as file:
             json.dump(data, file, indent=2)
+            file.write("\n")
+
+        temp_path.replace(self.path)
 
     def start_mapping(self) -> dict[str, Any]:
         with self.lock:
