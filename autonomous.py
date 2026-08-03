@@ -14,7 +14,7 @@ MIN_ROOM_AREA_MM2 = 20_000.0
 COVERAGE_SPACING_MM = 180.0
 COVERAGE_EDGE_MARGIN_MM = 100.0
 DOCK_APPROACH_DISTANCE_MM = 420.0
-UNDOCK_DISTANCE_MM = 260.0
+UNDOCK_DISTANCE_MM = 90.0
 MAX_CLEANING_ROOM_SPAN_MM = 8_000.0
 MAX_CLEANING_ROOM_AREA_MM2 = 60_000_000.0
 MAX_CLEANING_ROUTE_POINTS = 500
@@ -496,7 +496,7 @@ def _undock_point(
     straight_back_distances = [
         distance_mm,
         distance_mm * 0.75,
-        distance_mm * 0.5,
+        distance_mm * 0.55,
     ]
 
     for candidate_distance in straight_back_distances:
@@ -509,7 +509,7 @@ def _undock_point(
         ):
             return rounded
 
-    raise ValueError("Room map does not allow a straight reverse from dock")
+    raise ValueError("Room map does not allow a short reverse from dock")
 
 
 def _append_route_point(
