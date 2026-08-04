@@ -15,7 +15,7 @@ MIN_ROOM_AREA_MM2 = 20_000.0
 COVERAGE_SPACING_MM = 180.0
 COVERAGE_EDGE_MARGIN_MM = 100.0
 DOCK_APPROACH_DISTANCE_MM = 420.0
-UNDOCK_DISTANCE_MM = 90.0
+UNDOCK_DISTANCE_MM = 55.0
 MAX_CLEANING_ROOM_SPAN_MM = 8_000.0
 MAX_CLEANING_ROOM_AREA_MM2 = 60_000_000.0
 MAX_CLEANING_ROUTE_POINTS = 500
@@ -448,81 +448,15 @@ def _build_coverage_segments(
 
 
 def _dock_approach_point(
-    polygon: list[list[float]],
     distance_mm: float = DOCK_APPROACH_DISTANCE_MM,
 ) -> list[float]:
-    straight_back_distances = [
-        distance_mm,
-        distance_mm * 0.75,
-        distance_mm * 0.5,
-        distance_mm * 1.25,
-    ]
-
-    for candidate_distance in straight_back_distances:
-        point = [0.0, -candidate_distance]
-        rounded = _round_point(point)
-
-        if (
-            _point_in_or_on_polygon(rounded, polygon)
-            and _segment_stays_in_polygon([0.0, 0.0], rounded, polygon)
-        ):
-            return rounded
-
-    centroid = _polygon_centroid(polygon)
-    preferred_angle = math.atan2(centroid[0], centroid[1])
-    angle_offsets = [0.0]
-
-    for degrees in range(15, 181, 15):
-        radians = math.radians(degrees)
-        angle_offsets.extend([radians, -radians])
-
-    distances = [
-        distance_mm,
-        distance_mm * 0.75,
-        distance_mm * 0.5,
-        distance_mm * 1.25,
-    ]
-
-    for offset in angle_offsets:
-        angle = preferred_angle + offset
-
-        for candidate_distance in distances:
-            point = [
-                math.sin(angle) * candidate_distance,
-                math.cos(angle) * candidate_distance,
-            ]
-            rounded = _round_point(point)
-
-            if (
-                _point_in_or_on_polygon(rounded, polygon)
-                and _segment_stays_in_polygon([0.0, 0.0], rounded, polygon)
-            ):
-                return rounded
-
-    raise ValueError("Could not find a safe dock approach point")
+    return _round_point([0.0, -distance_mm])
 
 
 def _undock_point(
-    polygon: list[list[float]],
     distance_mm: float = UNDOCK_DISTANCE_MM,
 ) -> list[float]:
-    straight_back_distances = [
-        distance_mm,
-        distance_mm * 0.75,
-        distance_mm * 0.55,
-    ]
-
-    for candidate_distance in straight_back_distances:
-        point = [0.0, -candidate_distance]
-        rounded = _round_point(point)
-
-        if (
-            _point_in_or_on_polygon(rounded, polygon)
-            and _segment_stays_in_polygon([0.0, 0.0], rounded, polygon)
-        ):
-            return rounded
-
-    raise ValueError("Room map does not allow a short reverse from dock")
+    return _round_point([0.0, -distance_mm])
 
 
 def _append_route_point(
@@ -538,8 +472,9 @@ def _append_route_point(
 def build_coverage_route(
     polygon: list[list[float]],
     start: Optional[list[float]] = None,
+    allow_start_transit_outside: bool = False,
 ) -> list[list[float]]:
-    current = start or _dock_approach_point(polygon)
+    current = start or _polygon_centroid(polygon)
     remaining = _build_coverage_segments(polygon)
     route: list[list[float]] = []
 
@@ -552,12 +487,13 @@ def build_coverage_route(
             for oriented_segment in (segment, (segment[1], segment[0])):
                 connector_start = oriented_segment[0]
 
-                if not _segment_stays_in_polygon(
-                    current,
-                    connector_start,
-                    polygon,
-                ):
-                    continue
+                if route or not allow_start_transit_outside:
+                    if not _segment_stays_in_polygon(
+                        current,
+                        connector_start,
+                        polygon,
+                    ):
+                        continue
 
                 connector_distance = _distance(current, connector_start)
 
@@ -591,38 +527,48 @@ def build_safe_cleaning_route(
 ) -> list[list[float]]:
     validate_cleaning_polygon(polygon)
 
-    undock = _undock_point(polygon)
-    approach = _dock_approach_point(polygon)
-    route = [undock, approach] + build_coverage_route(polygon, approach)
+    undock = _undock_point()
+    dock_approach = _dock_approach_point()
+    coverage_route = build_coverage_route(
+        polygon,
+        undock,
+        allow_start_transit_outside=True,
+    )
 
-    if not route:
+    if not coverage_route:
         raise ValueError("No cleaning route could be generated")
 
-    safe_route: list[list[float]] = []
-    current = [0.0, 0.0]
-
-    for point in route:
+    for index, point in enumerate(coverage_route):
         rounded = _round_point(point)
 
         if not _point_in_or_on_polygon(rounded, polygon):
+            raise ValueError("Cleaning route has points outside the room")
+
+        if index == 0:
             continue
 
-        if _distance(current, rounded) > MAX_CLEANING_SEGMENT_MM:
+        previous = coverage_route[index - 1]
+
+        if _distance(previous, rounded) > MAX_CLEANING_SEGMENT_MM:
             raise ValueError("Cleaning route has an unsafe long segment")
 
-        if not _segment_stays_in_polygon(current, rounded, polygon):
+        if not _segment_stays_in_polygon(
+            previous,
+            rounded,
+            polygon,
+        ):
             raise ValueError("Cleaning route would leave the mapped room")
 
-        safe_route.append(rounded)
-        current = rounded
+    route = [undock] + coverage_route + [dock_approach]
 
-    if not safe_route:
-        raise ValueError("No safe route points are inside the room")
+    for start, end in zip([[0.0, 0.0]] + route, route + [[0.0, 0.0]]):
+        if _distance(start, end) > MAX_CLEANING_SEGMENT_MM:
+            raise ValueError("Cleaning route has an unsafe long segment")
 
-    if len(safe_route) > MAX_CLEANING_ROUTE_POINTS:
+    if len(route) > MAX_CLEANING_ROUTE_POINTS:
         raise ValueError("Cleaning route is too large")
 
-    return safe_route
+    return route
 
 
 def build_cleaning_preview_route(
@@ -633,7 +579,6 @@ def build_cleaning_preview_route(
     return (
         [[0.0, 0.0]]
         + route
-        + list(reversed(route[1:-1]))
         + [[0.0, 0.0]]
     )
 
@@ -644,9 +589,6 @@ def validate_cleaning_polygon(polygon: list[list[float]]) -> None:
 
     if not _same_point(polygon[0], polygon[-1]):
         raise ValueError("Room map is not closed")
-
-    if not _point_in_or_on_polygon([0.0, 0.0], polygon):
-        raise ValueError("Room map does not include the dock")
 
     if _self_intersects(polygon):
         raise ValueError("Room map crosses itself")
@@ -1056,23 +998,46 @@ class AutonomousCleaner:
             for room, route in room_routes:
                 self._set_status("running", "Cleaning", room["name"])
                 undock_point = route[0]
-                dock_approach = route[1]
+                cleaning_points = route[1:-1]
+                dock_approach = route[-1]
 
                 self._back_off_dock(undock_point, room["name"])
 
-                for point in route[1:]:
+                self._check_heartbeat()
+                self._check_runtime(started_at)
+                self._drive_to(
+                    cleaning_points[0],
+                    room["points"],
+                    room["name"],
+                    enforce_room=False,
+                    status_message="Going to room",
+                )
+                self.pose["x"] = cleaning_points[0][0]
+                self.pose["y"] = cleaning_points[0][1]
+
+                for point in cleaning_points[1:]:
                     self._check_heartbeat()
                     self._check_runtime(started_at)
-                    self._drive_to(point, room["points"], room["name"])
+                    self._drive_to(
+                        point,
+                        room["points"],
+                        room["name"],
+                        enforce_room=True,
+                        status_message="Cleaning",
+                    )
 
                     if self.cancel_event.is_set():
                         raise RuntimeError("Cleaning cancelled")
 
-                for point in reversed(route[1:-1]):
-                    self._check_heartbeat()
-                    self._check_runtime(started_at)
-                    self._drive_to(point, room["points"], room["name"])
-
+                self._check_heartbeat()
+                self._check_runtime(started_at)
+                self._drive_to(
+                    dock_approach,
+                    room["points"],
+                    room["name"],
+                    enforce_room=False,
+                    status_message="Returning to dock",
+                )
                 self.pose["x"] = dock_approach[0]
                 self.pose["y"] = dock_approach[1]
                 self._face_point([0.0, 0.0], room["name"])
@@ -1104,6 +1069,8 @@ class AutonomousCleaner:
         target: list[float],
         polygon: list[list[float]],
         room_name: Optional[str],
+        enforce_room: bool = True,
+        status_message: str = "Cleaning",
     ) -> None:
         while True:
             self._check_heartbeat()
@@ -1125,7 +1092,7 @@ class AutonomousCleaner:
                     min(abs(turn_angle), AUTONOMOUS_TURN_CHUNK_RAD),
                     turn_angle,
                 )
-                self._turn(turn_chunk, room_name)
+                self._turn(turn_chunk, room_name, status_message)
                 continue
 
             step_distance = min(distance, AUTONOMOUS_STRAIGHT_CHUNK_MM)
@@ -1134,14 +1101,16 @@ class AutonomousCleaner:
                 self.pose["y"] + step_distance * math.cos(self.pose["theta"]),
             ]
 
-            if not _segment_stays_in_polygon(
-                [self.pose["x"], self.pose["y"]],
+            current_point = [self.pose["x"], self.pose["y"]]
+
+            if enforce_room and not _segment_stays_in_polygon(
+                current_point,
                 projected,
                 polygon,
             ):
                 raise RuntimeError("Stopping before leaving mapped room")
 
-            self._drive_straight(step_distance, room_name)
+            self._drive_straight(step_distance, room_name, status_message)
 
             if self.cancel_event.is_set():
                 raise RuntimeError("Cleaning cancelled")
@@ -1204,12 +1173,17 @@ class AutonomousCleaner:
                 min(abs(turn_angle), AUTONOMOUS_TURN_CHUNK_RAD),
                 turn_angle,
             )
-            self._turn(turn_chunk, room_name)
+            self._turn(turn_chunk, room_name, "Facing dock")
 
             if self.cancel_event.is_set():
                 raise RuntimeError("Cleaning cancelled")
 
-    def _turn(self, angle: float, room_name: Optional[str]) -> None:
+    def _turn(
+        self,
+        angle: float,
+        room_name: Optional[str],
+        status_message: str = "Cleaning",
+    ) -> None:
         speed = AUTONOMOUS_TURN_SPEED_MM_S
         left = speed if angle > 0 else -speed
         right = -speed if angle > 0 else speed
@@ -1222,12 +1196,14 @@ class AutonomousCleaner:
             duration,
             room_name,
             target_angle=abs(angle),
+            status_message=status_message,
         )
 
     def _drive_straight(
         self,
         distance: float,
         room_name: Optional[str],
+        status_message: str = "Cleaning",
     ) -> None:
         speed = AUTONOMOUS_STRAIGHT_SPEED_MM_S
         duration = distance / speed
@@ -1237,6 +1213,7 @@ class AutonomousCleaner:
             duration,
             room_name,
             target_distance=distance,
+            status_message=status_message,
         )
 
     def _move_for(
