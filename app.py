@@ -11,6 +11,27 @@ cleaner = AutonomousCleaner(roomba, room_map)
 roomba_started = False
 
 
+def read_mapping_motion_delta():
+    if not room_map.is_mapping_active():
+        return None
+
+    try:
+        return roomba.read_distance_angle()
+    except Exception:
+        return None
+
+
+def clear_motion_delta() -> None:
+    try:
+        roomba.read_distance_angle()
+    except Exception:
+        pass
+
+
+def record_mapping_drive(left: int, right: int) -> None:
+    room_map.record_drive(left, right, read_mapping_motion_delta())
+
+
 @app.route("/")
 def start_page():
     return render_template("start.html")
@@ -91,7 +112,7 @@ def drive():
         right_speed=right,
         left_speed=left,
     )
-    room_map.record_drive(left, right)
+    record_mapping_drive(left, right)
 
     return jsonify({
         "ok": True,
@@ -102,8 +123,8 @@ def drive():
 
 @app.post("/stop")
 def stop():
-    room_map.record_drive(0, 0)
     roomba.stop()
+    record_mapping_drive(0, 0)
     cleaner.reset_to_idle()
     return jsonify({"ok": True})
 
@@ -182,6 +203,7 @@ def mapping_start():
 
     try:
         roomba.stop()
+        clear_motion_delta()
         state = room_map.start_mapping()
     except ValueError as error:
         return jsonify({
@@ -204,9 +226,8 @@ def mapping_back_at_dock():
         }), 409
 
     try:
-        room_map.record_drive(0, 0)
         roomba.stop()
-        state = room_map.finish_mapping_at_dock()
+        state = room_map.finish_mapping_at_dock(read_mapping_motion_delta())
     except ValueError as error:
         return jsonify({
             "ok": False,
@@ -253,8 +274,8 @@ def mapping_cancel():
             "error": "Start the Roomba first",
         }), 409
 
-    room_map.record_drive(0, 0)
     roomba.stop()
+    record_mapping_drive(0, 0)
     state = room_map.cancel_mapping()
     state["ok"] = True
     state["cleaning"] = cleaner.status()
@@ -363,8 +384,8 @@ def dock():
     data = request.get_json(silent=True) or {}
 
     if room_map.state()["mapping"]["active"]:
-        room_map.record_drive(0, 0)
         roomba.stop()
+        record_mapping_drive(0, 0)
 
         return jsonify({
             "ok": False,
@@ -391,10 +412,10 @@ def dock():
 
 @app.post("/safety/stop")
 def safety_stop():
-    room_map.record_drive(0, 0)
+    roomba.stop()
+    record_mapping_drive(0, 0)
     room_map.cancel_mapping()
     cleaner.stop()
-    roomba.stop()
 
     return jsonify({
         "ok": True,

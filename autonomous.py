@@ -385,9 +385,60 @@ def _integrate_distance_angle(
     pose["theta"] = _normalize_angle(pose["theta"] + angle)
 
 
-def _line_polygon_intersections(
+def _sweep_axis_angle(polygon: list[list[float]]) -> float:
+    points = polygon[:-1]
+
+    if len(points) < 2:
+        return 0.0
+
+    center_x = sum(point[0] for point in points) / len(points)
+    center_y = sum(point[1] for point in points) / len(points)
+    sxx = 0.0
+    syy = 0.0
+    sxy = 0.0
+
+    for point in points:
+        dx = point[0] - center_x
+        dy = point[1] - center_y
+        sxx += dx * dx
+        syy += dy * dy
+        sxy += dx * dy
+
+    if abs(sxx - syy) <= 1e-7 and abs(sxy) <= 1e-7:
+        return 0.0
+
+    return 0.5 * math.atan2(2 * sxy, sxx - syy)
+
+
+def _to_sweep_space(
+    point: list[float],
+    angle: float,
+) -> list[float]:
+    cosine = math.cos(angle)
+    sine = math.sin(angle)
+
+    return [
+        point[0] * cosine + point[1] * sine,
+        -point[0] * sine + point[1] * cosine,
+    ]
+
+
+def _from_sweep_space(
+    point: list[float],
+    angle: float,
+) -> list[float]:
+    cosine = math.cos(angle)
+    sine = math.sin(angle)
+
+    return [
+        point[0] * cosine - point[1] * sine,
+        point[0] * sine + point[1] * cosine,
+    ]
+
+
+def _vertical_polygon_intersections(
     polygon: list[list[float]],
-    y_value: float,
+    x_value: float,
 ) -> list[float]:
     intersections: list[float] = []
 
@@ -395,15 +446,15 @@ def _line_polygon_intersections(
         x1, y1 = polygon[index]
         x2, y2 = polygon[index + 1]
 
-        if y1 == y2:
+        if x1 == x2:
             continue
 
-        lower = min(y1, y2)
-        upper = max(y1, y2)
+        lower = min(x1, x2)
+        upper = max(x1, x2)
 
-        if lower <= y_value < upper:
-            ratio = (y_value - y1) / (y2 - y1)
-            intersections.append(x1 + ratio * (x2 - x1))
+        if lower <= x_value < upper:
+            ratio = (x_value - x1) / (x2 - x1)
+            intersections.append(y1 + ratio * (y2 - y1))
 
     intersections.sort()
     return intersections
@@ -414,35 +465,46 @@ def _build_coverage_segments(
     spacing_mm: float = COVERAGE_SPACING_MM,
     edge_margin_mm: float = COVERAGE_EDGE_MARGIN_MM,
 ) -> list[tuple[list[float], list[float]]]:
-    room_bounds = _bounds(polygon)
-    y_value = room_bounds["min_y"] + edge_margin_mm
+    angle = _sweep_axis_angle(polygon)
+    sweep_polygon = [
+        _to_sweep_space(point, angle)
+        for point in polygon
+    ]
+    room_bounds = _bounds(sweep_polygon)
+    sweep_value = room_bounds["min_x"] + edge_margin_mm
     segments: list[tuple[list[float], list[float]]] = []
 
-    while y_value <= room_bounds["max_y"] - edge_margin_mm:
-        intersections = _line_polygon_intersections(polygon, y_value)
+    while sweep_value <= room_bounds["max_x"] - edge_margin_mm:
+        intersections = _vertical_polygon_intersections(
+            sweep_polygon,
+            sweep_value,
+        )
 
         for index in range(0, len(intersections) - 1, 2):
-            first_x = intersections[index]
-            second_x = intersections[index + 1]
-            span_width = second_x - first_x
+            first_y = intersections[index]
+            second_y = intersections[index + 1]
+            span_width = second_y - first_y
 
             if span_width < edge_margin_mm * 1.5:
                 continue
 
             if span_width > edge_margin_mm * 2:
-                first = [first_x + edge_margin_mm, y_value]
-                second = [second_x - edge_margin_mm, y_value]
+                first = [sweep_value, first_y + edge_margin_mm]
+                second = [sweep_value, second_y - edge_margin_mm]
             else:
-                center = (first_x + second_x) / 2
-                first = [center, y_value]
-                second = [center, y_value]
+                center = (first_y + second_y) / 2
+                first = [sweep_value, center]
+                second = [sweep_value, center]
 
-            segment = (_round_point(first), _round_point(second))
+            segment = (
+                _round_point(_from_sweep_space(first, angle)),
+                _round_point(_from_sweep_space(second, angle)),
+            )
 
             if _segment_stays_in_polygon(segment[0], segment[1], polygon):
                 segments.append(segment)
 
-        y_value += spacing_mm
+        sweep_value += spacing_mm
 
     return segments
 
@@ -469,49 +531,76 @@ def _append_route_point(
         route.append(rounded)
 
 
+def _boustrophedon_candidate(
+    segments: list[tuple[list[float], list[float]]],
+    reverse_order: bool,
+    flip_first: bool,
+) -> list[list[float]]:
+    ordered_segments = list(reversed(segments)) if reverse_order else segments
+    route: list[list[float]] = []
+
+    for index, segment in enumerate(ordered_segments):
+        should_flip = bool(index % 2) != flip_first
+        first, second = segment
+
+        if should_flip:
+            first, second = second, first
+
+        _append_route_point(route, first)
+        _append_route_point(route, second)
+
+    return route
+
+
+def _coverage_route_is_connected(
+    route: list[list[float]],
+    polygon: list[list[float]],
+) -> bool:
+    if not route:
+        return False
+
+    for start, end in zip(route, route[1:]):
+        if not _segment_stays_in_polygon(start, end, polygon):
+            return False
+
+    return True
+
+
 def build_coverage_route(
     polygon: list[list[float]],
     start: Optional[list[float]] = None,
     allow_start_transit_outside: bool = False,
 ) -> list[list[float]]:
     current = start or _polygon_centroid(polygon)
-    remaining = _build_coverage_segments(polygon)
-    route: list[list[float]] = []
+    segments = _build_coverage_segments(polygon)
+    candidates: list[tuple[float, list[list[float]]]] = []
 
-    while remaining:
-        best_index = None
-        best_oriented_segment = None
-        best_distance = None
+    for reverse_order in (False, True):
+        for flip_first in (False, True):
+            route = _boustrophedon_candidate(
+                segments,
+                reverse_order,
+                flip_first,
+            )
 
-        for index, segment in enumerate(remaining):
-            for oriented_segment in (segment, (segment[1], segment[0])):
-                connector_start = oriented_segment[0]
+            if not route:
+                continue
 
-                if route or not allow_start_transit_outside:
-                    if not _segment_stays_in_polygon(
-                        current,
-                        connector_start,
-                        polygon,
-                    ):
-                        continue
+            if not allow_start_transit_outside:
+                if not _segment_stays_in_polygon(current, route[0], polygon):
+                    continue
 
-                connector_distance = _distance(current, connector_start)
+            if not _coverage_route_is_connected(route, polygon):
+                continue
 
-                if best_distance is None or connector_distance < best_distance:
-                    best_index = index
-                    best_oriented_segment = oriented_segment
-                    best_distance = connector_distance
+            candidates.append((_distance(current, route[0]), route))
 
-        if best_index is None or best_oriented_segment is None:
-            raise ValueError("Cleaning route has disconnected areas")
+    if candidates:
+        candidates.sort(key=lambda candidate: candidate[0])
+        return candidates[0][1]
 
-        _append_route_point(route, best_oriented_segment[0])
-        _append_route_point(route, best_oriented_segment[1])
-        current = best_oriented_segment[1]
-        remaining.pop(best_index)
-
-    if route:
-        return route
+    if segments:
+        raise ValueError("Cleaning route has disconnected areas")
 
     centroid = _polygon_centroid(polygon)
     rounded = _round_point(centroid)
@@ -519,7 +608,7 @@ def build_coverage_route(
     if _point_in_polygon(rounded, polygon):
         return [rounded]
 
-    raise ValueError("No cleaning route could be generated")
+    raise ValueError("Cleaning route has disconnected areas")
 
 
 def build_safe_cleaning_route(
@@ -629,6 +718,8 @@ class RoomMapStore:
             "last_update": None,
             "last_left": 0.0,
             "last_right": 0.0,
+            "motor_updates": 0,
+            "fallback_updates": 0,
             "pose": {"x": 0.0, "y": 0.0, "theta": 0.0},
             "path": [[0.0, 0.0]],
             "draft_points": [],
@@ -689,48 +780,65 @@ class RoomMapStore:
             self.mapping = self._empty_mapping()
             return self.state_locked()
 
-    def record_drive(self, left_speed: float, right_speed: float) -> None:
+    def is_mapping_active(self) -> bool:
+        with self.lock:
+            return bool(self.mapping["active"])
+
+    def _record_motion_locked(
+        self,
+        motor_delta: Optional[tuple[int, int]],
+    ) -> None:
+        now = time.monotonic()
+        last_update = self.mapping["last_update"] or now
+        duration = min(max(now - last_update, 0.0), 0.4)
+
+        if motor_delta is None:
+            _integrate_pose(
+                self.mapping["pose"],
+                self.mapping["last_left"],
+                self.mapping["last_right"],
+                duration,
+            )
+            self.mapping["fallback_updates"] += 1
+        else:
+            distance_mm, angle_degrees = motor_delta
+            _integrate_distance_angle(
+                self.mapping["pose"],
+                distance_mm,
+                angle_degrees,
+            )
+            self.mapping["motor_updates"] += 1
+
+        point = _pose_point(self.mapping["pose"])
+
+        if _distance(self.mapping["path"][-1], point) >= 35:
+            self.mapping["path"].append(_round_point(point))
+
+        self.mapping["last_update"] = now
+
+    def record_drive(
+        self,
+        left_speed: float,
+        right_speed: float,
+        motor_delta: Optional[tuple[int, int]] = None,
+    ) -> None:
         with self.lock:
             if not self.mapping["active"]:
                 return
 
-            now = time.monotonic()
-            last_update = self.mapping["last_update"] or now
-            duration = min(max(now - last_update, 0.0), 0.4)
-
-            _integrate_pose(
-                self.mapping["pose"],
-                self.mapping["last_left"],
-                self.mapping["last_right"],
-                duration,
-            )
-
-            point = _pose_point(self.mapping["pose"])
-
-            if _distance(self.mapping["path"][-1], point) >= 35:
-                self.mapping["path"].append(_round_point(point))
-
-            self.mapping["last_update"] = now
+            self._record_motion_locked(motor_delta)
             self.mapping["last_left"] = float(left_speed)
             self.mapping["last_right"] = float(right_speed)
 
-    def finish_mapping_at_dock(self) -> dict[str, Any]:
+    def finish_mapping_at_dock(
+        self,
+        motor_delta: Optional[tuple[int, int]] = None,
+    ) -> dict[str, Any]:
         with self.lock:
             if not self.mapping["active"]:
                 raise ValueError("No mapping session is active")
 
-            now = time.monotonic()
-            duration = min(
-                max(now - (self.mapping["last_update"] or now), 0.0),
-                0.4,
-            )
-
-            _integrate_pose(
-                self.mapping["pose"],
-                self.mapping["last_left"],
-                self.mapping["last_right"],
-                duration,
-            )
+            self._record_motion_locked(motor_delta)
 
             drift = _distance(_pose_point(self.mapping["pose"]), [0.0, 0.0])
             path = list(self.mapping["path"])
@@ -834,6 +942,13 @@ class RoomMapStore:
                     "y": round(self.mapping["pose"]["y"], 1),
                     "theta": round(self.mapping["pose"]["theta"], 4),
                 },
+                "motion_source": (
+                    "motor"
+                    if self.mapping["motor_updates"] > 0
+                    else "joystick"
+                ),
+                "motor_updates": self.mapping["motor_updates"],
+                "fallback_updates": self.mapping["fallback_updates"],
                 "path": list(self.mapping["path"]),
                 "draft_points": list(self.mapping["draft_points"]),
                 "warning": self.mapping["warning"],
