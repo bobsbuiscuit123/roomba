@@ -82,6 +82,67 @@
             </section>
         </section>
 
+        <section class="teach-panel">
+            <section class="camera-panel">
+                <div class="panel-header">
+                    <h2>Camera</h2>
+                    <span id="camera-state">Offline</span>
+                </div>
+
+                <div class="camera-frame">
+                    <img
+                        id="camera-feed"
+                        alt="Live Roomba camera feed"
+                    >
+                </div>
+            </section>
+
+            <section class="route-panel">
+                <div class="panel-header">
+                    <h2>Teach Route</h2>
+                    <span id="teach-state">Idle</span>
+                </div>
+
+                <div class="teach-actions">
+                    <input
+                        id="teach-route-name"
+                        class="room-name-input"
+                        type="text"
+                        placeholder="Route name"
+                        autocomplete="off"
+                    >
+
+                    <button
+                        id="start-teach"
+                        class="primary-button"
+                    >
+                        Teach Route
+                    </button>
+
+                    <button
+                        id="finish-teach"
+                        class="primary-button"
+                        disabled
+                    >
+                        At Room
+                    </button>
+
+                    <button
+                        id="cancel-teach"
+                        class="secondary-button"
+                        disabled
+                    >
+                        Cancel
+                    </button>
+                </div>
+
+                <div
+                    id="teach-route-list"
+                    class="teach-route-list"
+                ></div>
+            </section>
+        </section>
+
         <section class="mapping-panel">
             <div class="panel-header">
                 <h2>Mapping</h2>

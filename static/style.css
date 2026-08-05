@@ -349,6 +349,8 @@ button:disabled {
 
 .map-panel,
 .room-panel,
+.camera-panel,
+.route-panel,
 .mapping-panel {
     padding: 14px;
     border-radius: 16px;
@@ -449,6 +451,101 @@ button:disabled {
 
 .secondary-button {
     background: #374151;
+}
+
+.teach-panel {
+    display: grid;
+    grid-template-columns: minmax(320px, 0.95fr) minmax(300px, 1.05fr);
+    gap: 14px;
+    margin-top: 14px;
+}
+
+.camera-frame {
+    display: grid;
+    place-items: center;
+    min-height: 260px;
+    overflow: hidden;
+    border-radius: 12px;
+    background: #030712;
+}
+
+.camera-frame img {
+    display: block;
+    width: 100%;
+    height: 260px;
+    object-fit: cover;
+}
+
+.teach-actions {
+    display: grid;
+    grid-template-columns:
+        minmax(150px, 1fr)
+        repeat(3, minmax(104px, auto));
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.teach-route-list {
+    display: grid;
+    gap: 8px;
+    min-height: 88px;
+}
+
+.teach-route-item {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 10px;
+    align-items: center;
+    min-height: 58px;
+    padding: 10px;
+    border-radius: 12px;
+    background: #1f2937;
+}
+
+.teach-route-details {
+    display: grid;
+    gap: 3px;
+}
+
+.teach-route-details small {
+    color: #d1d5db;
+}
+
+.teach-route-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+.go-route,
+.stop-route {
+    min-height: 38px;
+    padding: 0 12px;
+    border-radius: 10px;
+    font-size: 13px;
+}
+
+.go-route {
+    background: #2563eb;
+}
+
+.stop-route {
+    background: #ef4444;
+}
+
+.teach-keyframes {
+    display: flex;
+    gap: 6px;
+    margin-top: 6px;
+}
+
+.teach-keyframes img {
+    width: 52px;
+    height: 38px;
+    border-radius: 6px;
+    object-fit: cover;
+    background: #030712;
 }
 
 .mapping-panel {
@@ -565,6 +662,8 @@ button:disabled {
 
     .map-panel,
     .room-panel,
+    .camera-panel,
+    .route-panel,
     .mapping-panel {
         padding: 9px;
     }
@@ -580,7 +679,29 @@ button:disabled {
         gap: 6px;
     }
 
+    .teach-panel {
+        grid-template-columns: 0.9fr 1.1fr;
+        gap: 8px;
+        margin-top: 8px;
+    }
+
+    .camera-frame {
+        min-height: 180px;
+    }
+
+    .camera-frame img {
+        height: 180px;
+    }
+
+    .teach-actions {
+        grid-template-columns:
+            minmax(120px, 1fr)
+            repeat(3, minmax(76px, auto));
+        gap: 6px;
+    }
+
     .mapping-actions button,
+    .teach-actions button,
     .room-name-input {
         min-height: 42px;
         font-size: 13px;
@@ -606,6 +727,8 @@ button:disabled {
 
     .mode-grid,
     .autonomous-layout,
+    .teach-panel,
+    .teach-actions,
     .mapping-actions,
     .button-row {
         grid-template-columns: 1fr;

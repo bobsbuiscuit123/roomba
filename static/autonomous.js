@@ -4,12 +4,20 @@ const mapView = document.getElementById("map-view");
 const roomCount = document.getElementById("room-count");
 const roomList = document.getElementById("room-list");
 const mappingState = document.getElementById("mapping-state");
+const cameraState = document.getElementById("camera-state");
+const cameraFeed = document.getElementById("camera-feed");
+const teachState = document.getElementById("teach-state");
+const teachRouteList = document.getElementById("teach-route-list");
 
 const roomNameInput = document.getElementById("room-name");
 const startMappingButton = document.getElementById("start-mapping");
 const backAtDockButton = document.getElementById("back-at-dock");
 const saveRoomButton = document.getElementById("save-room");
 const cancelMappingButton = document.getElementById("cancel-mapping");
+const teachRouteNameInput = document.getElementById("teach-route-name");
+const startTeachButton = document.getElementById("start-teach");
+const finishTeachButton = document.getElementById("finish-teach");
+const cancelTeachButton = document.getElementById("cancel-teach");
 
 const startCleanButton = document.getElementById("start-clean");
 const dockNowButton = document.getElementById("dock-now");
@@ -33,12 +41,15 @@ let smoothSteering = 0;
 
 let mappingActive = false;
 let mappingClosed = false;
+let teachActive = false;
 let currentCleaningState = "idle";
+let currentTeachReplayState = "idle";
 
 let requestRunning = false;
 let pendingRequest = false;
 let lastTransmissionTime = 0;
 let selectedRoomIds = new Set();
+let cameraFeedLoaded = false;
 
 const SEND_INTERVAL_MS = 60;
 const SMOOTHING = 0.22;
@@ -148,7 +159,7 @@ function createJoystick(
 
 
     base.addEventListener("pointerdown", (event) => {
-        if (!mappingActive) {
+        if (!driveControlsActive()) {
             return;
         }
 
@@ -210,7 +221,7 @@ const resetSteering = createJoystick(
 
 
 function calculateWheelSpeeds() {
-    if (!mappingActive) {
+    if (!driveControlsActive()) {
         return {
             left: 0,
             right: 0
@@ -315,7 +326,7 @@ async function deleteJson(path) {
 
 
 async function sendWheelSpeeds(left, right) {
-    if (!mappingActive && (left !== 0 || right !== 0)) {
+    if (!driveControlsActive() && (left !== 0 || right !== 0)) {
         return;
     }
 
@@ -391,7 +402,7 @@ function controlLoop(timestamp) {
     ) {
         lastTransmissionTime = timestamp;
 
-        if (mappingActive) {
+        if (driveControlsActive()) {
             sendWheelSpeeds(
                 speeds.left,
                 speeds.right
@@ -404,6 +415,11 @@ function controlLoop(timestamp) {
 
 
 requestAnimationFrame(controlLoop);
+
+
+function driveControlsActive() {
+    return mappingActive || teachActive;
+}
 
 
 function resetDriveControls() {
@@ -454,6 +470,21 @@ async function sendCleaningHeartbeat() {
 }
 
 
+async function sendTeachReplayHeartbeat() {
+    if (currentTeachReplayState !== "running") {
+        return;
+    }
+
+    try {
+        await postJson("/teach-replay/heartbeat");
+    } catch (error) {
+        autoStatus.textContent = "Replay heartbeat lost; stopping";
+        sendSafetyStop();
+        console.error(error);
+    }
+}
+
+
 function createSvgElement(name, attributes) {
     const element = document.createElementNS(SVG_NS, name);
 
@@ -478,14 +509,24 @@ function roomAreaLabel(areaMm2) {
 }
 
 
+function routeDistanceLabel(distanceMm) {
+    return (distanceMm / 1000).toFixed(2) + " m";
+}
+
+
 function renderMap(data) {
     const rooms = data.rooms || [];
     const mapping = data.mapping || {};
     const cleaning = data.cleaning || {};
+    const teach = data.teach || {};
+    const teachReplay = data.teach_replay || {};
     const routes = data.routes || {};
     const activePath = mapping.active
         ? mapping.path || []
         : mapping.draft_points || [];
+    const activeTeachPoints = teach.active
+        ? teach.active.points || []
+        : [];
 
     const allPoints = [[0, 0]];
 
@@ -494,6 +535,18 @@ function renderMap(data) {
     });
 
     activePath.forEach((point) => allPoints.push(point));
+    activeTeachPoints.forEach((point) => allPoints.push(point));
+
+    if (teachReplay.pose && teachReplay.state === "running") {
+        allPoints.push([
+            teachReplay.pose.x || 0,
+            teachReplay.pose.y || 0
+        ]);
+    }
+
+    (teach.routes || []).forEach((route) => {
+        (route.points || []).forEach((point) => allPoints.push(point));
+    });
 
     Object.entries(routes).forEach(([roomId, route]) => {
         if (selectedRoomIds.has(roomId)) {
@@ -579,6 +632,37 @@ function renderMap(data) {
         mapView.appendChild(path);
     }
 
+    (teach.routes || []).forEach((route) => {
+        if (!route.points || route.points.length < 2) {
+            return;
+        }
+
+        const taughtPath = createSvgElement("polyline", {
+            points: pointString(route.points),
+            fill: "none",
+            stroke: "#a78bfa",
+            "stroke-width": "16",
+            "stroke-linecap": "round",
+            "stroke-linejoin": "round",
+            opacity: "0.72"
+        });
+
+        mapView.appendChild(taughtPath);
+    });
+
+    if (activeTeachPoints.length > 1) {
+        const activeTeachPath = createSvgElement("polyline", {
+            points: pointString(activeTeachPoints),
+            fill: "none",
+            stroke: "#f97316",
+            "stroke-width": "20",
+            "stroke-linecap": "round",
+            "stroke-linejoin": "round"
+        });
+
+        mapView.appendChild(activeTeachPath);
+    }
+
     if (mapping.active && mapping.pose) {
         const pose = createSvgElement("circle", {
             cx: mapping.pose.x,
@@ -603,6 +687,19 @@ function renderMap(data) {
         });
 
         mapView.appendChild(cleanerPose);
+    }
+
+    if (teachReplay.pose && teachReplay.state === "running") {
+        const replayPose = createSvgElement("circle", {
+            cx: teachReplay.pose.x,
+            cy: -teachReplay.pose.y,
+            r: "44",
+            fill: "#a78bfa",
+            stroke: "#111827",
+            "stroke-width": "14"
+        });
+
+        mapView.appendChild(replayPose);
     }
 
     const dockRing = createSvgElement("circle", {
@@ -641,6 +738,143 @@ function renderMap(data) {
     const mapWidthMeters = (maxX - minX) / 1000;
     mapScale.textContent =
         mapWidthMeters.toFixed(1) + " m span";
+}
+
+
+async function startTeachReplay(route) {
+    const confirmed = window.confirm(
+        `Replay route "${route.name}" now? Keep this page open and be ready to press STOP.`
+    );
+
+    if (!confirmed) {
+        autoStatus.textContent = "Route replay cancelled";
+        return;
+    }
+
+    try {
+        await postJson(`/teach-routes/${route.id}/go`);
+        await refreshState();
+        autoStatus.textContent = "Route replay started";
+    } catch (error) {
+        autoStatus.textContent = error.message;
+        console.error(error);
+    }
+}
+
+
+async function stopTeachReplay() {
+    try {
+        await postJson("/teach-replay/stop");
+        await refreshState();
+        autoStatus.textContent = "Route replay stopped";
+    } catch (error) {
+        autoStatus.textContent = error.message;
+        console.error(error);
+    }
+}
+
+
+function renderTeachRoutes(teach, teachReplay) {
+    const routes = teach.routes || [];
+    const replayRunning =
+        teachReplay && teachReplay.state === "running";
+
+    teachRouteList.innerHTML = "";
+
+    if (routes.length === 0) {
+        const empty = document.createElement("p");
+        empty.className = "room-empty";
+        empty.textContent = "No teach routes";
+        teachRouteList.appendChild(empty);
+        return;
+    }
+
+    routes.forEach((route) => {
+        const replayingThis =
+            replayRunning && teachReplay.route_id === route.id;
+
+        const item = document.createElement("div");
+        item.className = "teach-route-item";
+
+        const details = document.createElement("span");
+        details.className = "teach-route-details";
+
+        const name = document.createElement("strong");
+        name.textContent = route.name;
+
+        const summary = document.createElement("small");
+        summary.textContent =
+            routeDistanceLabel(route.distance_mm || 0)
+            + " - "
+            + (route.keyframe_count || 0)
+            + " frames";
+
+        details.appendChild(name);
+        details.appendChild(summary);
+
+        if (route.keyframes && route.keyframes.length > 0) {
+            const keyframes = document.createElement("span");
+            keyframes.className = "teach-keyframes";
+
+            route.keyframes.forEach((keyframe) => {
+                const image = document.createElement("img");
+                image.src = keyframe.url;
+                image.alt = route.name;
+                keyframes.appendChild(image);
+            });
+
+            details.appendChild(keyframes);
+        }
+
+        const actions = document.createElement("span");
+        actions.className = "teach-route-actions";
+
+        const goButton = document.createElement("button");
+        goButton.type = "button";
+        goButton.className = replayingThis
+            ? "stop-route"
+            : "go-route";
+        goButton.textContent = replayingThis
+            ? "Stop"
+            : "Go";
+        goButton.disabled =
+            teachActive
+            || mappingActive
+            || currentCleaningState === "running"
+            || currentCleaningState === "docking"
+            || (replayRunning && !replayingThis);
+        goButton.addEventListener("click", async () => {
+            if (replayingThis) {
+                await stopTeachReplay();
+                return;
+            }
+
+            await startTeachReplay(route);
+        });
+
+        const deleteButton = document.createElement("button");
+        deleteButton.type = "button";
+        deleteButton.className = "delete-room";
+        deleteButton.textContent = "Delete";
+        deleteButton.disabled = replayRunning || teachActive;
+        deleteButton.addEventListener("click", async () => {
+            try {
+                await deleteJson(`/teach-routes/${route.id}`);
+                await refreshState();
+                autoStatus.textContent = "Teach route deleted";
+            } catch (error) {
+                autoStatus.textContent = error.message;
+                console.error(error);
+            }
+        });
+
+        actions.appendChild(goButton);
+        actions.appendChild(deleteButton);
+
+        item.appendChild(details);
+        item.appendChild(actions);
+        teachRouteList.appendChild(item);
+    });
 }
 
 
@@ -724,20 +958,35 @@ function renderRoomList(rooms) {
 function applyState(data) {
     const mapping = data.mapping || {};
     const cleaning = data.cleaning || {};
+    const teach = data.teach || {};
+    const teachReplay = data.teach_replay || {};
+    const camera = data.camera || {};
     const rooms = data.rooms || [];
     const wasMappingActive = mappingActive;
+    const wasTeachActive = teachActive;
+    const wasTeachReplayRunning =
+        currentTeachReplayState === "running";
 
     mappingActive = Boolean(mapping.active);
     mappingClosed = Boolean(mapping.closed);
+    teachActive = Boolean(teach.active);
     currentCleaningState = cleaning.state || "idle";
+    currentTeachReplayState = teachReplay.state || "idle";
 
-    if (wasMappingActive && !mappingActive) {
+    const teachReplayRunning =
+        currentTeachReplayState === "running";
+
+    if (
+        (wasMappingActive && !mappingActive)
+        || (wasTeachActive && !teachActive)
+        || (wasTeachReplayRunning && !teachReplayRunning)
+    ) {
         resetDriveControls();
     }
 
     document.body.classList.toggle(
         "mapping-locked",
-        !mappingActive
+        !driveControlsActive()
     );
 
     mappingState.textContent = mappingActive
@@ -746,36 +995,97 @@ function applyState(data) {
             ? "Ready To Save"
             : "Idle";
 
-    if (cleaning.room) {
+    if (teach.active) {
+        teachState.textContent =
+            "Recording - "
+            + teach.active.sample_count
+            + " samples - "
+            + teach.active.keyframe_count
+            + " frames";
+    } else {
+        teachState.textContent = "Idle";
+    }
+
+    if (camera.ok) {
+        cameraState.textContent = "Live";
+
+        if (!cameraFeedLoaded) {
+            cameraFeed.src = "/camera/stream?t=" + Date.now();
+            cameraFeedLoaded = true;
+        }
+    } else {
+        cameraState.textContent = "Offline";
+        cameraFeed.removeAttribute("src");
+        cameraFeedLoaded = false;
+    }
+
+    if (teachReplayRunning) {
+        const progress =
+            Math.round((teachReplay.progress || 0) * 100);
+        autoStatus.textContent =
+            "Replaying route: "
+            + (teachReplay.route_name || "Route")
+            + " - "
+            + progress
+            + "%";
+    } else if (cleaning.room) {
         autoStatus.textContent =
             cleaning.message + ": " + cleaning.room;
     } else if (mapping.warning) {
         autoStatus.textContent = mapping.warning;
+    } else if (
+        teachReplay.message
+        && teachReplay.message !== "Ready"
+        && teachReplay.route_name
+    ) {
+        autoStatus.textContent =
+            teachReplay.message + ": " + teachReplay.route_name;
+    } else if (
+        teachReplay.state === "error"
+        && teachReplay.message
+    ) {
+        autoStatus.textContent = teachReplay.message;
     } else {
         autoStatus.textContent = cleaning.message || "Ready";
     }
 
     startMappingButton.disabled =
-        mappingActive || currentCleaningState === "running";
+        mappingActive
+        || teachActive
+        || teachReplayRunning
+        || currentCleaningState === "running";
 
     backAtDockButton.disabled = !mappingActive;
     saveRoomButton.disabled = !mappingClosed;
     cancelMappingButton.disabled = !(mappingActive || mappingClosed);
 
+    startTeachButton.disabled =
+        teachActive
+        || mappingActive
+        || teachReplayRunning
+        || currentCleaningState === "running";
+
+    finishTeachButton.disabled = !teachActive;
+    cancelTeachButton.disabled = !teachActive;
+
     startCleanButton.disabled =
         !AUTONOMOUS_DRIVING_ENABLED
         || rooms.length === 0
         || selectedRoomIds.size === 0
+        || teachActive
+        || teachReplayRunning
         || currentCleaningState === "running";
 
     startCleanButton.textContent = AUTONOMOUS_DRIVING_ENABLED
         ? "Clean Selected"
         : "Clean Disabled";
 
-    dockNowButton.disabled = mappingActive;
+    dockNowButton.disabled =
+        mappingActive || teachActive || teachReplayRunning;
 
     renderMap(data);
     renderRoomList(rooms);
+    renderTeachRoutes(teach, teachReplay);
 }
 
 
@@ -793,9 +1103,52 @@ async function refreshState() {
 
 startMappingButton.addEventListener("click", async () => {
     try {
-        const data = await postJson("/mapping/start");
-        applyState(data);
+        await postJson("/mapping/start");
+        await refreshState();
         autoStatus.textContent = "Mapping active";
+    } catch (error) {
+        autoStatus.textContent = error.message;
+        console.error(error);
+    }
+});
+
+
+startTeachButton.addEventListener("click", async () => {
+    try {
+        await postJson("/teach/start", {
+            name: teachRouteNameInput.value
+        });
+        await refreshState();
+        autoStatus.textContent = "Teaching route";
+    } catch (error) {
+        autoStatus.textContent = error.message;
+        console.error(error);
+    }
+});
+
+
+finishTeachButton.addEventListener("click", async () => {
+    try {
+        resetDriveControls();
+        await postJson("/teach/finish", {
+            name: teachRouteNameInput.value
+        });
+        teachRouteNameInput.value = "";
+        await refreshState();
+        autoStatus.textContent = "Teach route saved";
+    } catch (error) {
+        autoStatus.textContent = error.message;
+        console.error(error);
+    }
+});
+
+
+cancelTeachButton.addEventListener("click", async () => {
+    try {
+        resetDriveControls();
+        await postJson("/teach/cancel");
+        await refreshState();
+        autoStatus.textContent = "Teach route cancelled";
     } catch (error) {
         autoStatus.textContent = error.message;
         console.error(error);
@@ -806,8 +1159,8 @@ startMappingButton.addEventListener("click", async () => {
 backAtDockButton.addEventListener("click", async () => {
     try {
         resetDriveControls();
-        const data = await postJson("/mapping/back-at-dock");
-        applyState(data);
+        await postJson("/mapping/back-at-dock");
+        await refreshState();
         autoStatus.textContent = "Dock reset";
     } catch (error) {
         autoStatus.textContent = error.message;
@@ -818,12 +1171,12 @@ backAtDockButton.addEventListener("click", async () => {
 
 saveRoomButton.addEventListener("click", async () => {
     try {
-        const data = await postJson("/mapping/save", {
+        await postJson("/mapping/save", {
             name: roomNameInput.value
         });
 
         roomNameInput.value = "";
-        applyState(data);
+        await refreshState();
         autoStatus.textContent = "Room saved";
     } catch (error) {
         autoStatus.textContent = error.message;
@@ -835,8 +1188,8 @@ saveRoomButton.addEventListener("click", async () => {
 cancelMappingButton.addEventListener("click", async () => {
     try {
         resetDriveControls();
-        const data = await postJson("/mapping/cancel");
-        applyState(data);
+        await postJson("/mapping/cancel");
+        await refreshState();
         autoStatus.textContent = "Mapping cancelled";
     } catch (error) {
         autoStatus.textContent = error.message;
@@ -929,7 +1282,12 @@ speedSlider.addEventListener("change", async () => {
 
 
 window.addEventListener("blur", () => {
-    if (mappingActive || currentCleaningState === "running") {
+    if (
+        mappingActive
+        || teachActive
+        || currentTeachReplayState === "running"
+        || currentCleaningState === "running"
+    ) {
         emergencyStop();
     }
 });
@@ -938,6 +1296,8 @@ window.addEventListener("blur", () => {
 window.addEventListener("pagehide", () => {
     if (
         mappingActive
+        || teachActive
+        || currentTeachReplayState === "running"
         || currentCleaningState === "running"
         || currentCleaningState === "docking"
     ) {
@@ -953,6 +1313,8 @@ document.addEventListener(
             document.hidden
             && (
                 mappingActive
+                || teachActive
+                || currentTeachReplayState === "running"
                 || currentCleaningState === "running"
                 || currentCleaningState === "docking"
             )
@@ -965,6 +1327,7 @@ document.addEventListener(
 
 setInterval(() => {
     sendCleaningHeartbeat();
+    sendTeachReplayHeartbeat();
 
     refreshState().catch((error) => {
         autoStatus.textContent = error.message;

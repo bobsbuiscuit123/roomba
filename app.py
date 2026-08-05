@@ -1,18 +1,36 @@
-from flask import Flask, jsonify, redirect, render_template, request, url_for
+from flask import (
+    Flask,
+    Response,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    send_file,
+    url_for,
+)
 
 from autonomous import AutonomousCleaner, RoomMapStore, build_cleaning_preview_route
+from camera import CameraStream
 from roomba import RoombaController
+from teach_routes import TeachRouteReplayer, TeachRouteStore
 
 
 app = Flask(__name__)
 roomba = RoombaController(speed=300)
 room_map = RoomMapStore()
 cleaner = AutonomousCleaner(roomba, room_map)
+camera = CameraStream()
+teach_routes = TeachRouteStore()
+teach_replayer = TeachRouteReplayer(roomba, teach_routes)
 roomba_started = False
 
 
-def read_mapping_motion_delta():
-    if not room_map.is_mapping_active():
+def is_motion_recording():
+    return room_map.is_mapping_active() or teach_routes.is_active()
+
+
+def read_recording_motion_delta():
+    if not is_motion_recording():
         return None
 
     try:
@@ -28,8 +46,15 @@ def clear_motion_delta() -> None:
         pass
 
 
-def record_mapping_drive(left: int, right: int) -> None:
-    room_map.record_drive(left, right, read_mapping_motion_delta())
+def record_motion_drive(left: int, right: int) -> None:
+    motor_delta = read_recording_motion_delta()
+    keyframe_jpeg = None
+
+    if teach_routes.needs_keyframe():
+        keyframe_jpeg = camera.get_jpeg()
+
+    room_map.record_drive(left, right, motor_delta)
+    teach_routes.record_drive(left, right, motor_delta, keyframe_jpeg)
 
 
 @app.route("/")
@@ -42,7 +67,9 @@ def start_roomba():
     global roomba_started
 
     cleaner.stop()
+    teach_replayer.stop()
     room_map.cancel_mapping()
+    teach_routes.cancel()
     roomba.start()
     roomba.stop()
     roomba_started = True
@@ -97,7 +124,10 @@ def drive():
         }), 400
 
     if (
-        cleaner.status()["state"] in {"running", "docking"}
+        (
+            cleaner.status()["state"] in {"running", "docking"}
+            or teach_replayer.is_busy()
+        )
         and (left != 0 or right != 0)
     ):
         return jsonify({
@@ -112,7 +142,7 @@ def drive():
         right_speed=right,
         left_speed=left,
     )
-    record_mapping_drive(left, right)
+    record_motion_drive(left, right)
 
     return jsonify({
         "ok": True,
@@ -123,8 +153,9 @@ def drive():
 
 @app.post("/stop")
 def stop():
+    teach_replayer.stop()
     roomba.stop()
-    record_mapping_drive(0, 0)
+    record_motion_drive(0, 0)
     cleaner.reset_to_idle()
     return jsonify({"ok": True})
 
@@ -182,9 +213,230 @@ def autonomous_state():
     state["routes"] = routes
     state["route_errors"] = route_errors
     state["cleaning"] = cleaner.status()
+    state["teach"] = teach_routes.state()
+    state["teach_replay"] = teach_replayer.status()
+    state["camera"] = camera.status()
     state["ok"] = True
 
     return jsonify(state)
+
+
+@app.get("/camera/status")
+def camera_status():
+    return jsonify(camera.status())
+
+
+@app.get("/camera/stream")
+def camera_stream():
+    status = camera.status()
+
+    if not status["ok"]:
+        return jsonify(status), 503
+
+    return Response(
+        camera.frames(),
+        mimetype="multipart/x-mixed-replace; boundary=frame",
+    )
+
+
+@app.post("/teach/start")
+def teach_start():
+    if not roomba_started:
+        return jsonify({
+            "ok": False,
+            "error": "Start the Roomba first",
+        }), 409
+
+    if room_map.state()["mapping"]["active"]:
+        return jsonify({
+            "ok": False,
+            "error": "Finish or cancel mapping first",
+        }), 409
+
+    if cleaner.status()["state"] in {"running", "docking"}:
+        return jsonify({
+            "ok": False,
+            "error": "Stop the current Roomba action first",
+        }), 409
+
+    if teach_replayer.is_busy():
+        return jsonify({
+            "ok": False,
+            "error": "Stop route replay first",
+        }), 409
+
+    data = request.get_json(silent=True) or {}
+
+    try:
+        roomba.stop()
+        clear_motion_delta()
+        state = teach_routes.start(str(data.get("name", "")))
+    except ValueError as error:
+        return jsonify({
+            "ok": False,
+            "error": str(error),
+        }), 400
+
+    return jsonify({
+        "ok": True,
+        "teach": state,
+        "camera": camera.status(),
+    })
+
+
+@app.post("/teach/finish")
+def teach_finish():
+    if not roomba_started:
+        return jsonify({
+            "ok": False,
+            "error": "Start the Roomba first",
+        }), 409
+
+    data = request.get_json(silent=True) or {}
+
+    try:
+        roomba.stop()
+        record_motion_drive(0, 0)
+        route = teach_routes.finish(str(data.get("name", "")))
+    except ValueError as error:
+        return jsonify({
+            "ok": False,
+            "error": str(error),
+        }), 400
+
+    return jsonify({
+        "ok": True,
+        "route": route,
+        "teach": teach_routes.state(),
+    })
+
+
+@app.post("/teach/cancel")
+def teach_cancel():
+    if not roomba_started:
+        return jsonify({
+            "ok": False,
+            "error": "Start the Roomba first",
+        }), 409
+
+    roomba.stop()
+    record_motion_drive(0, 0)
+
+    return jsonify({
+        "ok": True,
+        "teach": teach_routes.cancel(),
+    })
+
+
+@app.delete("/teach-routes/<route_id>")
+def teach_route_delete(route_id):
+    if not roomba_started:
+        return jsonify({
+            "ok": False,
+            "error": "Start the Roomba first",
+        }), 409
+
+    if teach_replayer.is_busy():
+        return jsonify({
+            "ok": False,
+            "error": "Stop route replay before deleting routes",
+        }), 409
+
+    try:
+        teach_routes.delete(route_id)
+    except ValueError as error:
+        return jsonify({
+            "ok": False,
+            "error": str(error),
+        }), 404
+
+    return jsonify({
+        "ok": True,
+        "teach": teach_routes.state(),
+    })
+
+
+@app.get("/teach-routes/<route_id>/keyframes/<filename>")
+def teach_route_keyframe(route_id, filename):
+    try:
+        path = teach_routes.keyframe_path(route_id, filename)
+    except ValueError as error:
+        return jsonify({
+            "ok": False,
+            "error": str(error),
+        }), 404
+
+    return send_file(path, mimetype="image/jpeg")
+
+
+@app.post("/teach-routes/<route_id>/go")
+def teach_route_go(route_id):
+    if not roomba_started:
+        return jsonify({
+            "ok": False,
+            "error": "Start the Roomba first",
+        }), 409
+
+    if room_map.state()["mapping"]["active"]:
+        return jsonify({
+            "ok": False,
+            "error": "Finish or cancel mapping first",
+        }), 409
+
+    if teach_routes.is_active():
+        return jsonify({
+            "ok": False,
+            "error": "Finish or cancel teach route first",
+        }), 409
+
+    if cleaner.status()["state"] in {"running", "docking"}:
+        return jsonify({
+            "ok": False,
+            "error": "Stop the current Roomba action first",
+        }), 409
+
+    try:
+        roomba.stop()
+        roomba.vacuum_off()
+        status = teach_replayer.start(route_id)
+    except ValueError as error:
+        return jsonify({
+            "ok": False,
+            "error": str(error),
+        }), 400
+
+    return jsonify({
+        "ok": True,
+        "teach_replay": status,
+    })
+
+
+@app.post("/teach-replay/stop")
+def teach_replay_stop():
+    if not roomba_started:
+        return jsonify({
+            "ok": False,
+            "error": "Start the Roomba first",
+        }), 409
+
+    return jsonify({
+        "ok": True,
+        "teach_replay": teach_replayer.stop(),
+    })
+
+
+@app.post("/teach-replay/heartbeat")
+def teach_replay_heartbeat():
+    if not roomba_started:
+        return jsonify({
+            "ok": False,
+            "error": "Start the Roomba first",
+        }), 409
+
+    return jsonify({
+        "ok": True,
+        "teach_replay": teach_replayer.heartbeat(),
+    })
 
 
 @app.post("/mapping/start")
@@ -199,6 +451,18 @@ def mapping_start():
         return jsonify({
             "ok": False,
             "error": "Stop the current Roomba action first",
+        }), 409
+
+    if teach_replayer.is_busy():
+        return jsonify({
+            "ok": False,
+            "error": "Stop route replay first",
+        }), 409
+
+    if teach_routes.is_active():
+        return jsonify({
+            "ok": False,
+            "error": "Finish or cancel teach route first",
         }), 409
 
     try:
@@ -227,7 +491,9 @@ def mapping_back_at_dock():
 
     try:
         roomba.stop()
-        state = room_map.finish_mapping_at_dock(read_mapping_motion_delta())
+        state = room_map.finish_mapping_at_dock(
+            read_recording_motion_delta()
+        )
     except ValueError as error:
         return jsonify({
             "ok": False,
@@ -275,7 +541,7 @@ def mapping_cancel():
         }), 409
 
     roomba.stop()
-    record_mapping_drive(0, 0)
+    record_motion_drive(0, 0)
     state = room_map.cancel_mapping()
     state["ok"] = True
     state["cleaning"] = cleaner.status()
@@ -327,6 +593,18 @@ def clean_start():
         return jsonify({
             "ok": False,
             "error": "Finish or cancel mapping first",
+        }), 409
+
+    if teach_routes.is_active():
+        return jsonify({
+            "ok": False,
+            "error": "Finish or cancel teach route first",
+        }), 409
+
+    if teach_replayer.is_busy():
+        return jsonify({
+            "ok": False,
+            "error": "Stop route replay first",
         }), 409
 
     try:
@@ -385,11 +663,26 @@ def dock():
 
     if room_map.state()["mapping"]["active"]:
         roomba.stop()
-        record_mapping_drive(0, 0)
+        record_motion_drive(0, 0)
 
         return jsonify({
             "ok": False,
             "error": "Finish or cancel mapping before docking",
+        }), 409
+
+    if teach_routes.is_active():
+        roomba.stop()
+        record_motion_drive(0, 0)
+
+        return jsonify({
+            "ok": False,
+            "error": "Finish or cancel teach route before docking",
+        }), 409
+
+    if teach_replayer.is_busy():
+        return jsonify({
+            "ok": False,
+            "error": "Stop route replay before docking",
         }), 409
 
     if data.get("confirm") is not True:
@@ -412,9 +705,11 @@ def dock():
 
 @app.post("/safety/stop")
 def safety_stop():
+    teach_replayer.stop()
     roomba.stop()
-    record_mapping_drive(0, 0)
+    record_motion_drive(0, 0)
     room_map.cancel_mapping()
+    teach_routes.cancel()
     cleaner.stop()
 
     return jsonify({
@@ -427,4 +722,6 @@ if __name__ == "__main__":
     try:
         app.run(host="0.0.0.0", port=5000, debug=False)
     finally:
+        teach_replayer.stop()
+        camera.close()
         roomba.close()
