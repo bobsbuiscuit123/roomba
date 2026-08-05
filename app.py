@@ -392,6 +392,8 @@ def teach_route_landmark_create(route_id):
             x_fraction=float(data.get("x", 0.5)),
             y_fraction=float(data.get("y", 0.5)),
             name=str(data.get("name", "")),
+            width_fraction=data.get("width"),
+            height_fraction=data.get("height"),
         )
     except (TypeError, ValueError) as error:
         return jsonify({

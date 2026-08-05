@@ -50,8 +50,18 @@ let pendingRequest = false;
 let lastTransmissionTime = 0;
 let selectedRoomIds = new Set();
 let cameraFeedLoaded = false;
+let currentTeachState = {routes: []};
+let currentTeachReplayData = {state: "idle"};
 let labelingRouteId = null;
 let landmarkNameDraft = "";
+let landmarkSelectedKeyframeIndex = null;
+let landmarkZoom = 1;
+let landmarkDraftBox = {
+    x: 0.5,
+    y: 0.5,
+    width: 0.28,
+    height: 0.28
+};
 
 const SEND_INTERVAL_MS = 60;
 const SMOOTHING = 0.22;
@@ -776,23 +786,17 @@ async function stopTeachReplay() {
 }
 
 
-async function createLandmark(route, keyframe, image, event) {
-    const rect = image.getBoundingClientRect();
-    const x = Math.max(
-        0,
-        Math.min(1, (event.clientX - rect.left) / rect.width)
-    );
-    const y = Math.max(
-        0,
-        Math.min(1, (event.clientY - rect.top) / rect.height)
-    );
+async function saveLandmark(route, keyframe) {
+    clampLandmarkDraftBox();
 
     try {
         await postJson(`/teach-routes/${route.id}/landmarks`, {
             name: landmarkNameDraft,
             keyframe_index: keyframe.index,
-            x,
-            y
+            x: landmarkDraftBox.x,
+            y: landmarkDraftBox.y,
+            width: landmarkDraftBox.width,
+            height: landmarkDraftBox.height
         });
         landmarkNameDraft = "";
         await refreshState();
@@ -804,9 +808,60 @@ async function createLandmark(route, keyframe, image, event) {
 }
 
 
+function clampLandmarkDraftBox() {
+    landmarkDraftBox.width = Math.max(
+        0.08,
+        Math.min(0.9, landmarkDraftBox.width)
+    );
+    landmarkDraftBox.height = Math.max(
+        0.08,
+        Math.min(0.9, landmarkDraftBox.height)
+    );
+    landmarkDraftBox.x = Math.max(
+        landmarkDraftBox.width / 2,
+        Math.min(1 - landmarkDraftBox.width / 2, landmarkDraftBox.x)
+    );
+    landmarkDraftBox.y = Math.max(
+        landmarkDraftBox.height / 2,
+        Math.min(1 - landmarkDraftBox.height / 2, landmarkDraftBox.y)
+    );
+}
+
+
+function setLandmarkBoxCenterFromPointer(image, event) {
+    const rect = image.getBoundingClientRect();
+
+    landmarkDraftBox.x = Math.max(
+        0,
+        Math.min(1, (event.clientX - rect.left) / rect.width)
+    );
+    landmarkDraftBox.y = Math.max(
+        0,
+        Math.min(1, (event.clientY - rect.top) / rect.height)
+    );
+    clampLandmarkDraftBox();
+}
+
+
 function createLandmarkEditor(route) {
     const editor = document.createElement("div");
     editor.className = "landmark-editor";
+
+    if (!route.keyframes || route.keyframes.length === 0) {
+        const empty = document.createElement("p");
+        empty.className = "room-empty";
+        empty.textContent =
+            "No camera frames were saved for this route. Teach the route again while Camera says Live.";
+        editor.appendChild(empty);
+        return editor;
+    }
+
+    const selectedKeyframe = route.keyframes.find((keyframe) => {
+        return keyframe.index === landmarkSelectedKeyframeIndex;
+    }) || route.keyframes[0];
+
+    landmarkSelectedKeyframeIndex = selectedKeyframe.index;
+    clampLandmarkDraftBox();
 
     const nameInput = document.createElement("input");
     nameInput.className = "room-name-input landmark-name-input";
@@ -818,6 +873,140 @@ function createLandmarkEditor(route) {
         landmarkNameDraft = nameInput.value;
     });
     editor.appendChild(nameInput);
+
+    const toolbar = document.createElement("div");
+    toolbar.className = "landmark-editor-toolbar";
+
+    const zoomControl = document.createElement("label");
+    zoomControl.textContent = "Zoom";
+
+    const zoomInput = document.createElement("input");
+    zoomInput.type = "range";
+    zoomInput.min = "1";
+    zoomInput.max = "3";
+    zoomInput.step = "0.1";
+    zoomInput.value = String(landmarkZoom);
+    zoomInput.addEventListener("input", () => {
+        landmarkZoom = Number(zoomInput.value);
+        renderTeachRoutes(currentTeachState, currentTeachReplayData);
+    });
+    zoomControl.appendChild(zoomInput);
+
+    const widthControl = document.createElement("label");
+    widthControl.textContent = "Width";
+
+    const widthInput = document.createElement("input");
+    widthInput.type = "range";
+    widthInput.min = "0.08";
+    widthInput.max = "0.9";
+    widthInput.step = "0.01";
+    widthInput.value = String(landmarkDraftBox.width);
+    widthInput.addEventListener("input", () => {
+        landmarkDraftBox.width = Number(widthInput.value);
+        clampLandmarkDraftBox();
+        renderTeachRoutes(currentTeachState, currentTeachReplayData);
+    });
+    widthControl.appendChild(widthInput);
+
+    const heightControl = document.createElement("label");
+    heightControl.textContent = "Height";
+
+    const heightInput = document.createElement("input");
+    heightInput.type = "range";
+    heightInput.min = "0.08";
+    heightInput.max = "0.9";
+    heightInput.step = "0.01";
+    heightInput.value = String(landmarkDraftBox.height);
+    heightInput.addEventListener("input", () => {
+        landmarkDraftBox.height = Number(heightInput.value);
+        clampLandmarkDraftBox();
+        renderTeachRoutes(currentTeachState, currentTeachReplayData);
+    });
+    heightControl.appendChild(heightInput);
+
+    const saveButton = document.createElement("button");
+    saveButton.type = "button";
+    saveButton.className = "primary-button";
+    saveButton.textContent = "Save";
+    saveButton.addEventListener("click", async () => {
+        await saveLandmark(route, selectedKeyframe);
+    });
+
+    toolbar.appendChild(zoomControl);
+    toolbar.appendChild(widthControl);
+    toolbar.appendChild(heightControl);
+    toolbar.appendChild(saveButton);
+    editor.appendChild(toolbar);
+
+    const selectedFrame = document.createElement("div");
+    selectedFrame.className = "landmark-selected-frame";
+
+    const viewport = document.createElement("div");
+    viewport.className = "landmark-frame-viewport";
+
+    const stage = document.createElement("div");
+    stage.className = "landmark-image-stage";
+    stage.style.width = `${landmarkZoom * 100}%`;
+
+    const selectedImage = document.createElement("img");
+    selectedImage.className = "landmark-main-image";
+    selectedImage.src = selectedKeyframe.url;
+    selectedImage.alt = route.name;
+
+    const selectionBox = document.createElement("span");
+    selectionBox.className = "landmark-selection-box";
+    selectionBox.style.left =
+        `${(landmarkDraftBox.x - landmarkDraftBox.width / 2) * 100}%`;
+    selectionBox.style.top =
+        `${(landmarkDraftBox.y - landmarkDraftBox.height / 2) * 100}%`;
+    selectionBox.style.width = `${landmarkDraftBox.width * 100}%`;
+    selectionBox.style.height = `${landmarkDraftBox.height * 100}%`;
+
+    let dragging = false;
+
+    function moveBox(event) {
+        setLandmarkBoxCenterFromPointer(selectedImage, event);
+        selectionBox.style.left =
+            `${(landmarkDraftBox.x - landmarkDraftBox.width / 2) * 100}%`;
+        selectionBox.style.top =
+            `${(landmarkDraftBox.y - landmarkDraftBox.height / 2) * 100}%`;
+    }
+
+    stage.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        dragging = true;
+        stage.setPointerCapture(event.pointerId);
+        moveBox(event);
+    });
+
+    stage.addEventListener("pointermove", (event) => {
+        if (!dragging) {
+            return;
+        }
+
+        event.preventDefault();
+        moveBox(event);
+    });
+
+    stage.addEventListener("pointerup", (event) => {
+        dragging = false;
+
+        try {
+            stage.releasePointerCapture(event.pointerId);
+        } catch (error) {
+            console.error(error);
+        }
+    });
+
+    stage.addEventListener("pointercancel", () => {
+        dragging = false;
+    });
+
+    stage.appendChild(selectedImage);
+    stage.appendChild(selectionBox);
+    viewport.appendChild(stage);
+    selectedFrame.appendChild(viewport);
+    editor.appendChild(selectedFrame);
 
     const landmarks = route.landmarks || [];
 
@@ -865,32 +1054,37 @@ function createLandmarkEditor(route) {
     const keyframes = document.createElement("div");
     keyframes.className = "landmark-keyframes";
 
-    if (!route.keyframes || route.keyframes.length === 0) {
-        const empty = document.createElement("p");
-        empty.className = "room-empty";
-        empty.textContent = "No keyframes";
-        keyframes.appendChild(empty);
-    } else {
-        route.keyframes.forEach((keyframe) => {
-            const frame = document.createElement("span");
-            frame.className = "landmark-frame";
+    route.keyframes.forEach((keyframe) => {
+        const frame = document.createElement("button");
+        frame.type = "button";
+        frame.className = "landmark-frame";
+        frame.classList.toggle(
+            "selected",
+            keyframe.index === landmarkSelectedKeyframeIndex
+        );
 
-            const image = document.createElement("img");
-            image.src = keyframe.url;
-            image.alt = route.name;
-            image.addEventListener("click", async (event) => {
-                await createLandmark(route, keyframe, image, event);
-            });
-
-            const label = document.createElement("small");
-            label.textContent =
-                Number(keyframe.timestamp || 0).toFixed(1) + "s";
-
-            frame.appendChild(image);
-            frame.appendChild(label);
-            keyframes.appendChild(frame);
+        const image = document.createElement("img");
+        image.src = keyframe.url;
+        image.alt = route.name;
+        frame.addEventListener("click", () => {
+            landmarkSelectedKeyframeIndex = keyframe.index;
+            landmarkDraftBox = {
+                x: 0.5,
+                y: 0.5,
+                width: landmarkDraftBox.width,
+                height: landmarkDraftBox.height
+            };
+            renderTeachRoutes(currentTeachState, currentTeachReplayData);
         });
-    }
+
+        const label = document.createElement("small");
+        label.textContent =
+            Number(keyframe.timestamp || 0).toFixed(1) + "s";
+
+        frame.appendChild(image);
+        frame.appendChild(label);
+        keyframes.appendChild(frame);
+    });
 
     editor.appendChild(keyframes);
     return editor;
@@ -962,9 +1156,23 @@ function renderTeachRoutes(teach, teachReplay) {
             : "Label";
         labelButton.disabled = replayRunning || teachActive;
         labelButton.addEventListener("click", () => {
-            labelingRouteId = labelingRouteId === route.id
-                ? null
-                : route.id;
+            if (labelingRouteId === route.id) {
+                labelingRouteId = null;
+            } else {
+                labelingRouteId = route.id;
+                landmarkSelectedKeyframeIndex =
+                    route.keyframes && route.keyframes.length > 0
+                        ? route.keyframes[0].index
+                        : null;
+                landmarkZoom = 1;
+                landmarkDraftBox = {
+                    x: 0.5,
+                    y: 0.5,
+                    width: 0.28,
+                    height: 0.28
+                };
+            }
+
             renderTeachRoutes(teach, teachReplay);
         });
 
@@ -1120,6 +1328,8 @@ function applyState(data) {
     teachActive = Boolean(teach.active);
     currentCleaningState = cleaning.state || "idle";
     currentTeachReplayState = teachReplay.state || "idle";
+    currentTeachState = teach;
+    currentTeachReplayData = teachReplay;
 
     const teachReplayRunning =
         currentTeachReplayState === "running";

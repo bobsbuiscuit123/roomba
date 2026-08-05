@@ -551,6 +551,82 @@ button:disabled {
     min-height: 42px;
 }
 
+.landmark-editor-toolbar {
+    display: grid;
+    grid-template-columns:
+        repeat(3, minmax(110px, 1fr))
+        minmax(86px, auto);
+    gap: 8px;
+    align-items: end;
+}
+
+.landmark-editor-toolbar label {
+    display: grid;
+    gap: 5px;
+    color: #d1d5db;
+    font-size: 12px;
+    font-weight: bold;
+}
+
+.landmark-editor-toolbar input {
+    width: 100%;
+}
+
+.landmark-editor-toolbar button {
+    min-height: 42px;
+    border-radius: 10px;
+    font-size: 14px;
+}
+
+.landmark-selected-frame {
+    overflow: hidden;
+    border-radius: 12px;
+    background: #030712;
+}
+
+.landmark-frame-viewport {
+    width: 100%;
+    max-height: 360px;
+    overflow: auto;
+    touch-action: pan-x pan-y;
+}
+
+.landmark-image-stage {
+    position: relative;
+    min-width: 100%;
+    line-height: 0;
+    touch-action: none;
+}
+
+.landmark-main-image {
+    display: block;
+    width: 100%;
+    height: auto;
+    user-select: none;
+    -webkit-user-drag: none;
+}
+
+.landmark-selection-box {
+    position: absolute;
+    border: 3px solid #ef4444;
+    border-radius: 6px;
+    background: rgba(239, 68, 68, 0.12);
+    box-shadow: 0 0 0 9999px rgba(3, 7, 18, 0.2);
+    pointer-events: none;
+}
+
+.landmark-selection-box::after {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 10px;
+    height: 10px;
+    border-radius: 999px;
+    background: #ef4444;
+    content: "";
+    transform: translate(-50%, -50%);
+}
+
 .landmark-list,
 .landmark-keyframes {
     display: grid;
@@ -568,6 +644,17 @@ button:disabled {
     background: #030712;
 }
 
+.landmark-frame {
+    min-height: 0;
+    border: 2px solid transparent;
+    color: white;
+    cursor: pointer;
+}
+
+.landmark-frame.selected {
+    border-color: #38bdf8;
+}
+
 .landmark-item img,
 .landmark-frame img {
     display: block;
@@ -576,10 +663,6 @@ button:disabled {
     border-radius: 7px;
     object-fit: cover;
     background: #111827;
-}
-
-.landmark-frame img {
-    cursor: crosshair;
 }
 
 .landmark-item strong,
@@ -761,6 +844,10 @@ button:disabled {
         gap: 6px;
     }
 
+    .landmark-editor-toolbar {
+        grid-template-columns: repeat(2, minmax(100px, 1fr));
+    }
+
     .mapping-actions button,
     .teach-actions button,
     .room-name-input {
@@ -790,6 +877,7 @@ button:disabled {
     .autonomous-layout,
     .teach-panel,
     .teach-actions,
+    .landmark-editor-toolbar,
     .mapping-actions,
     .button-row {
         grid-template-columns: 1fr;

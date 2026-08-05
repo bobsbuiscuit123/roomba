@@ -299,7 +299,8 @@ class TeachRouteStore:
         patch_path: Path,
         x_fraction: float,
         y_fraction: float,
-        patch_fraction: float,
+        width_fraction: float,
+        height_fraction: float,
     ) -> dict[str, int]:
         try:
             import cv2
@@ -312,15 +313,17 @@ class TeachRouteStore:
             raise ValueError("Could not read keyframe image")
 
         height, width = image.shape[:2]
-        patch_size = int(round(min(width, height) * patch_fraction))
-        patch_size = max(TEACH_LANDMARK_MIN_PATCH_PIXELS, patch_size)
-        patch_size = min(patch_size, width, height)
-        half_size = patch_size // 2
+        patch_width = int(round(width * width_fraction))
+        patch_height = int(round(height * height_fraction))
+        patch_width = max(TEACH_LANDMARK_MIN_PATCH_PIXELS, patch_width)
+        patch_height = max(TEACH_LANDMARK_MIN_PATCH_PIXELS, patch_height)
+        patch_width = min(patch_width, width)
+        patch_height = min(patch_height, height)
         center_x = int(round(x_fraction * width))
         center_y = int(round(y_fraction * height))
-        left = max(0, min(width - patch_size, center_x - half_size))
-        top = max(0, min(height - patch_size, center_y - half_size))
-        crop = image[top:top + patch_size, left:left + patch_size]
+        left = max(0, min(width - patch_width, center_x - patch_width // 2))
+        top = max(0, min(height - patch_height, center_y - patch_height // 2))
+        crop = image[top:top + patch_height, left:left + patch_width]
 
         patch_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -332,7 +335,8 @@ class TeachRouteStore:
             "image_height": height,
             "patch_x": left,
             "patch_y": top,
-            "patch_size": patch_size,
+            "patch_width": patch_width,
+            "patch_height": patch_height,
         }
 
     def add_landmark(
@@ -343,16 +347,31 @@ class TeachRouteStore:
         y_fraction: float,
         name: str = "",
         patch_fraction: float = TEACH_LANDMARK_PATCH_FRACTION,
+        width_fraction: Optional[float] = None,
+        height_fraction: Optional[float] = None,
     ) -> dict[str, Any]:
         try:
             x_fraction = float(x_fraction)
             y_fraction = float(y_fraction)
             patch_fraction = float(patch_fraction)
+            width_fraction = (
+                float(width_fraction)
+                if width_fraction is not None
+                else patch_fraction
+            )
+            height_fraction = (
+                float(height_fraction)
+                if height_fraction is not None
+                else patch_fraction
+            )
         except (TypeError, ValueError) as error:
             raise ValueError("Invalid landmark position") from error
 
         if not 0 <= x_fraction <= 1 or not 0 <= y_fraction <= 1:
             raise ValueError("Landmark position must be inside the image")
+
+        width_fraction = max(0.08, min(0.9, width_fraction))
+        height_fraction = max(0.08, min(0.9, height_fraction))
 
         with self.lock:
             route_index = self._route_index_locked(route_id)
@@ -389,7 +408,8 @@ class TeachRouteStore:
                 patch_path,
                 float(x_fraction),
                 float(y_fraction),
-                max(0.12, min(0.55, patch_fraction)),
+                width_fraction,
+                height_fraction,
             )
             landmarks = route.setdefault("landmarks", [])
             landmark = {
@@ -402,6 +422,8 @@ class TeachRouteStore:
                 "pose": keyframe.get("pose"),
                 "x": round(float(x_fraction), 4),
                 "y": round(float(y_fraction), 4),
+                "width": round(width_fraction, 4),
+                "height": round(height_fraction, 4),
                 "patch_url": (
                     f"/teach-routes/{safe_route_id}/landmarks/{filename}"
                 ),
