@@ -519,6 +519,7 @@ button:disabled {
 }
 
 .go-route,
+.label-route,
 .stop-route {
     min-height: 38px;
     padding: 0 12px;
@@ -530,8 +531,68 @@ button:disabled {
     background: #2563eb;
 }
 
+.label-route {
+    background: #374151;
+}
+
 .stop-route {
     background: #ef4444;
+}
+
+.landmark-editor {
+    display: grid;
+    grid-column: 1 / -1;
+    gap: 10px;
+    width: 100%;
+    padding-top: 4px;
+}
+
+.landmark-name-input {
+    min-height: 42px;
+}
+
+.landmark-list,
+.landmark-keyframes {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+    gap: 8px;
+}
+
+.landmark-item,
+.landmark-frame {
+    display: grid;
+    gap: 5px;
+    align-content: start;
+    padding: 7px;
+    border-radius: 10px;
+    background: #030712;
+}
+
+.landmark-item img,
+.landmark-frame img {
+    display: block;
+    width: 100%;
+    aspect-ratio: 4 / 3;
+    border-radius: 7px;
+    object-fit: cover;
+    background: #111827;
+}
+
+.landmark-frame img {
+    cursor: crosshair;
+}
+
+.landmark-item strong,
+.landmark-frame small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+}
+
+.landmark-item .delete-room {
+    min-height: 32px;
+    font-size: 12px;
 }
 
 .teach-keyframes {

@@ -50,6 +50,8 @@ let pendingRequest = false;
 let lastTransmissionTime = 0;
 let selectedRoomIds = new Set();
 let cameraFeedLoaded = false;
+let labelingRouteId = null;
+let landmarkNameDraft = "";
 
 const SEND_INTERVAL_MS = 60;
 const SMOOTHING = 0.22;
@@ -774,6 +776,127 @@ async function stopTeachReplay() {
 }
 
 
+async function createLandmark(route, keyframe, image, event) {
+    const rect = image.getBoundingClientRect();
+    const x = Math.max(
+        0,
+        Math.min(1, (event.clientX - rect.left) / rect.width)
+    );
+    const y = Math.max(
+        0,
+        Math.min(1, (event.clientY - rect.top) / rect.height)
+    );
+
+    try {
+        await postJson(`/teach-routes/${route.id}/landmarks`, {
+            name: landmarkNameDraft,
+            keyframe_index: keyframe.index,
+            x,
+            y
+        });
+        landmarkNameDraft = "";
+        await refreshState();
+        autoStatus.textContent = "Landmark saved";
+    } catch (error) {
+        autoStatus.textContent = error.message;
+        console.error(error);
+    }
+}
+
+
+function createLandmarkEditor(route) {
+    const editor = document.createElement("div");
+    editor.className = "landmark-editor";
+
+    const nameInput = document.createElement("input");
+    nameInput.className = "room-name-input landmark-name-input";
+    nameInput.type = "text";
+    nameInput.placeholder = "Landmark name";
+    nameInput.autocomplete = "off";
+    nameInput.value = landmarkNameDraft;
+    nameInput.addEventListener("input", () => {
+        landmarkNameDraft = nameInput.value;
+    });
+    editor.appendChild(nameInput);
+
+    const landmarks = route.landmarks || [];
+
+    if (landmarks.length > 0) {
+        const landmarkList = document.createElement("div");
+        landmarkList.className = "landmark-list";
+
+        landmarks.forEach((landmark) => {
+            const item = document.createElement("span");
+            item.className = "landmark-item";
+
+            const image = document.createElement("img");
+            image.src = landmark.patch_url;
+            image.alt = landmark.name;
+
+            const name = document.createElement("strong");
+            name.textContent = landmark.name;
+
+            const deleteButton = document.createElement("button");
+            deleteButton.type = "button";
+            deleteButton.className = "delete-room";
+            deleteButton.textContent = "Delete";
+            deleteButton.addEventListener("click", async () => {
+                try {
+                    await deleteJson(
+                        `/teach-routes/${route.id}/landmarks/${landmark.id}`
+                    );
+                    await refreshState();
+                    autoStatus.textContent = "Landmark deleted";
+                } catch (error) {
+                    autoStatus.textContent = error.message;
+                    console.error(error);
+                }
+            });
+
+            item.appendChild(image);
+            item.appendChild(name);
+            item.appendChild(deleteButton);
+            landmarkList.appendChild(item);
+        });
+
+        editor.appendChild(landmarkList);
+    }
+
+    const keyframes = document.createElement("div");
+    keyframes.className = "landmark-keyframes";
+
+    if (!route.keyframes || route.keyframes.length === 0) {
+        const empty = document.createElement("p");
+        empty.className = "room-empty";
+        empty.textContent = "No keyframes";
+        keyframes.appendChild(empty);
+    } else {
+        route.keyframes.forEach((keyframe) => {
+            const frame = document.createElement("span");
+            frame.className = "landmark-frame";
+
+            const image = document.createElement("img");
+            image.src = keyframe.url;
+            image.alt = route.name;
+            image.addEventListener("click", async (event) => {
+                await createLandmark(route, keyframe, image, event);
+            });
+
+            const label = document.createElement("small");
+            label.textContent =
+                Number(keyframe.timestamp || 0).toFixed(1) + "s";
+
+            frame.appendChild(image);
+            frame.appendChild(label);
+            keyframes.appendChild(frame);
+        });
+    }
+
+    editor.appendChild(keyframes);
+    return editor;
+}
+
+
 function renderTeachRoutes(teach, teachReplay) {
     const routes = teach.routes || [];
     const replayRunning =
@@ -807,7 +930,9 @@ function renderTeachRoutes(teach, teachReplay) {
             routeDistanceLabel(route.distance_mm || 0)
             + " - "
             + (route.keyframe_count || 0)
-            + " frames";
+            + " frames - "
+            + (route.landmark_count || 0)
+            + " landmarks";
 
         details.appendChild(name);
         details.appendChild(summary);
@@ -816,7 +941,7 @@ function renderTeachRoutes(teach, teachReplay) {
             const keyframes = document.createElement("span");
             keyframes.className = "teach-keyframes";
 
-            route.keyframes.forEach((keyframe) => {
+            route.keyframes.slice(0, 3).forEach((keyframe) => {
                 const image = document.createElement("img");
                 image.src = keyframe.url;
                 image.alt = route.name;
@@ -828,6 +953,20 @@ function renderTeachRoutes(teach, teachReplay) {
 
         const actions = document.createElement("span");
         actions.className = "teach-route-actions";
+
+        const labelButton = document.createElement("button");
+        labelButton.type = "button";
+        labelButton.className = "label-route";
+        labelButton.textContent = labelingRouteId === route.id
+            ? "Close"
+            : "Label";
+        labelButton.disabled = replayRunning || teachActive;
+        labelButton.addEventListener("click", () => {
+            labelingRouteId = labelingRouteId === route.id
+                ? null
+                : route.id;
+            renderTeachRoutes(teach, teachReplay);
+        });
 
         const goButton = document.createElement("button");
         goButton.type = "button";
@@ -860,6 +999,9 @@ function renderTeachRoutes(teach, teachReplay) {
         deleteButton.addEventListener("click", async () => {
             try {
                 await deleteJson(`/teach-routes/${route.id}`);
+                if (labelingRouteId === route.id) {
+                    labelingRouteId = null;
+                }
                 await refreshState();
                 autoStatus.textContent = "Teach route deleted";
             } catch (error) {
@@ -868,11 +1010,17 @@ function renderTeachRoutes(teach, teachReplay) {
             }
         });
 
+        actions.appendChild(labelButton);
         actions.appendChild(goButton);
         actions.appendChild(deleteButton);
 
         item.appendChild(details);
         item.appendChild(actions);
+
+        if (labelingRouteId === route.id) {
+            item.appendChild(createLandmarkEditor(route));
+        }
+
         teachRouteList.appendChild(item);
     });
 }
@@ -1008,13 +1156,17 @@ function applyState(data) {
 
     if (camera.ok) {
         cameraState.textContent = "Live";
+        cameraState.title = "";
 
         if (!cameraFeedLoaded) {
             cameraFeed.src = "/camera/stream?t=" + Date.now();
             cameraFeedLoaded = true;
         }
     } else {
-        cameraState.textContent = "Offline";
+        cameraState.textContent = camera.error
+            ? "Offline - " + camera.error
+            : "Offline";
+        cameraState.title = camera.error || "";
         cameraFeed.removeAttribute("src");
         cameraFeedLoaded = false;
     }
@@ -1022,12 +1174,29 @@ function applyState(data) {
     if (teachReplayRunning) {
         const progress =
             Math.round((teachReplay.progress || 0) * 100);
+        const vision = teachReplay.vision || {};
+        const visionText = vision.enabled
+            ? " | "
+                + vision.message
+                + (
+                    vision.landmark_name
+                        ? ": " + vision.landmark_name
+                        : ""
+                )
+                + (
+                    vision.score
+                        ? " " + Math.round(vision.score * 100) + "%"
+                        : ""
+                )
+            : "";
+
         autoStatus.textContent =
             "Replaying route: "
             + (teachReplay.route_name || "Route")
             + " - "
             + progress
-            + "%";
+            + "%"
+            + visionText;
     } else if (cleaning.room) {
         autoStatus.textContent =
             cleaning.message + ": " + cleaning.room;

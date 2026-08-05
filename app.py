@@ -21,7 +21,7 @@ room_map = RoomMapStore()
 cleaner = AutonomousCleaner(roomba, room_map)
 camera = CameraStream()
 teach_routes = TeachRouteStore()
-teach_replayer = TeachRouteReplayer(roomba, teach_routes)
+teach_replayer = TeachRouteReplayer(roomba, teach_routes, camera)
 roomba_started = False
 
 
@@ -360,6 +360,84 @@ def teach_route_delete(route_id):
 def teach_route_keyframe(route_id, filename):
     try:
         path = teach_routes.keyframe_path(route_id, filename)
+    except ValueError as error:
+        return jsonify({
+            "ok": False,
+            "error": str(error),
+        }), 404
+
+    return send_file(path, mimetype="image/jpeg")
+
+
+@app.post("/teach-routes/<route_id>/landmarks")
+def teach_route_landmark_create(route_id):
+    if not roomba_started:
+        return jsonify({
+            "ok": False,
+            "error": "Start the Roomba first",
+        }), 409
+
+    data = request.get_json(silent=True) or {}
+
+    if teach_replayer.is_busy():
+        return jsonify({
+            "ok": False,
+            "error": "Stop route replay before labeling landmarks",
+        }), 409
+
+    try:
+        landmark = teach_routes.add_landmark(
+            route_id=route_id,
+            keyframe_index=int(data.get("keyframe_index", 0)),
+            x_fraction=float(data.get("x", 0.5)),
+            y_fraction=float(data.get("y", 0.5)),
+            name=str(data.get("name", "")),
+        )
+    except (TypeError, ValueError) as error:
+        return jsonify({
+            "ok": False,
+            "error": str(error),
+        }), 400
+
+    return jsonify({
+        "ok": True,
+        "landmark": landmark,
+        "teach": teach_routes.state(),
+    })
+
+
+@app.delete("/teach-routes/<route_id>/landmarks/<landmark_id>")
+def teach_route_landmark_delete(route_id, landmark_id):
+    if not roomba_started:
+        return jsonify({
+            "ok": False,
+            "error": "Start the Roomba first",
+        }), 409
+
+    if teach_replayer.is_busy():
+        return jsonify({
+            "ok": False,
+            "error": "Stop route replay before deleting landmarks",
+        }), 409
+
+    try:
+        teach_routes.delete_landmark(route_id, landmark_id)
+    except ValueError as error:
+        return jsonify({
+            "ok": False,
+            "error": str(error),
+        }), 404
+
+    return jsonify({
+        "ok": True,
+        "teach": teach_routes.state(),
+    })
+
+
+@app.get("/teach-routes/<route_id>/landmarks/<filename>")
+def teach_route_landmark(route_id, filename):
+    try:
+        path = teach_routes.landmark_path(route_id, filename)
     except ValueError as error:
         return jsonify({
             "ok": False,

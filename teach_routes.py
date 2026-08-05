@@ -22,14 +22,22 @@ TEACH_ROUTES_ENV_VAR = "TEACH_ROUTES_PATH"
 TEACH_DATA_DIR_NAME = ".roomba_web"
 TEACH_ROUTES_FILE_NAME = "teach_routes.json"
 TEACH_KEYFRAME_DIR_NAME = "teach_keyframes"
+TEACH_LANDMARK_DIR_NAME = "landmarks"
 TEACH_KEYFRAME_INTERVAL_SECONDS = 1.0
 TEACH_KEYFRAME_DISTANCE_MM = 250.0
+TEACH_LANDMARK_PATCH_FRACTION = 0.28
+TEACH_LANDMARK_MIN_PATCH_PIXELS = 48
 TEACH_REPLAY_MAX_SAMPLE_SECONDS = 0.45
 TEACH_REPLAY_MIN_SAMPLE_SECONDS = 0.02
 TEACH_REPLAY_FINAL_SAMPLE_SECONDS = 0.12
 TEACH_REPLAY_SLEEP_SLICE_SECONDS = 0.05
 TEACH_REPLAY_HEARTBEAT_TIMEOUT_SECONDS = 2.5
 TEACH_REPLAY_MAX_WHEEL_SPEED = 500
+VISION_MATCH_INTERVAL_SECONDS = 0.25
+VISION_LANDMARK_TIME_WINDOW_SECONDS = 2.0
+VISION_MATCH_MIN_SCORE = 0.45
+VISION_CORRECTION_GAIN = 180.0
+VISION_CORRECTION_MAX_SPEED = 55
 
 
 class TeachRouteReplayCancelled(Exception):
@@ -264,27 +272,178 @@ class TeachRouteStore:
 
     def delete(self, route_id: str) -> None:
         with self.lock:
-            original_count = len(self.routes)
+            try:
+                self._route_index_locked(route_id)
+            except ValueError:
+                raise ValueError("Teach route was not found")
+
             self.routes = [
                 route for route in self.routes if route["id"] != route_id
             ]
-
-            if len(self.routes) == original_count:
-                raise ValueError("Teach route was not found")
-
             shutil.rmtree(
                 self.keyframe_dir / Path(route_id).name,
                 ignore_errors=True,
             )
             self.save()
 
-    def get_route(self, route_id: str) -> dict[str, Any]:
-        with self.lock:
-            for route in self.routes:
-                if route["id"] == route_id:
-                    return copy.deepcopy(route)
+    def _route_index_locked(self, route_id: str) -> int:
+        for index, route in enumerate(self.routes):
+            if route["id"] == route_id:
+                return index
 
         raise ValueError("Teach route was not found")
+
+    def _crop_landmark_patch(
+        self,
+        keyframe_path: Path,
+        patch_path: Path,
+        x_fraction: float,
+        y_fraction: float,
+        patch_fraction: float,
+    ) -> dict[str, int]:
+        try:
+            import cv2
+        except Exception as error:
+            raise ValueError("OpenCV is required for landmark labels") from error
+
+        image = cv2.imread(str(keyframe_path))
+
+        if image is None:
+            raise ValueError("Could not read keyframe image")
+
+        height, width = image.shape[:2]
+        patch_size = int(round(min(width, height) * patch_fraction))
+        patch_size = max(TEACH_LANDMARK_MIN_PATCH_PIXELS, patch_size)
+        patch_size = min(patch_size, width, height)
+        half_size = patch_size // 2
+        center_x = int(round(x_fraction * width))
+        center_y = int(round(y_fraction * height))
+        left = max(0, min(width - patch_size, center_x - half_size))
+        top = max(0, min(height - patch_size, center_y - half_size))
+        crop = image[top:top + patch_size, left:left + patch_size]
+
+        patch_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if not cv2.imwrite(str(patch_path), crop):
+            raise ValueError("Could not save landmark crop")
+
+        return {
+            "image_width": width,
+            "image_height": height,
+            "patch_x": left,
+            "patch_y": top,
+            "patch_size": patch_size,
+        }
+
+    def add_landmark(
+        self,
+        route_id: str,
+        keyframe_index: int,
+        x_fraction: float,
+        y_fraction: float,
+        name: str = "",
+        patch_fraction: float = TEACH_LANDMARK_PATCH_FRACTION,
+    ) -> dict[str, Any]:
+        try:
+            x_fraction = float(x_fraction)
+            y_fraction = float(y_fraction)
+            patch_fraction = float(patch_fraction)
+        except (TypeError, ValueError) as error:
+            raise ValueError("Invalid landmark position") from error
+
+        if not 0 <= x_fraction <= 1 or not 0 <= y_fraction <= 1:
+            raise ValueError("Landmark position must be inside the image")
+
+        with self.lock:
+            route_index = self._route_index_locked(route_id)
+            route = self.routes[route_index]
+            keyframes = route.get("keyframes", [])
+            keyframe = next(
+                (
+                    frame
+                    for frame in keyframes
+                    if int(frame.get("index", -1)) == int(keyframe_index)
+                ),
+                None,
+            )
+
+            if keyframe is None:
+                raise ValueError("Keyframe was not found")
+
+            keyframe_path = Path(keyframe.get("path", ""))
+
+            if not keyframe_path.exists():
+                raise ValueError("Keyframe image is missing")
+
+            landmark_id = uuid.uuid4().hex[:10]
+            safe_route_id = Path(route_id).name
+            filename = f"{landmark_id}.jpg"
+            patch_path = (
+                self.keyframe_dir
+                / safe_route_id
+                / TEACH_LANDMARK_DIR_NAME
+                / filename
+            )
+            crop_info = self._crop_landmark_patch(
+                keyframe_path,
+                patch_path,
+                float(x_fraction),
+                float(y_fraction),
+                max(0.12, min(0.55, patch_fraction)),
+            )
+            landmarks = route.setdefault("landmarks", [])
+            landmark = {
+                "id": landmark_id,
+                "name": name.strip() or f"Landmark {len(landmarks) + 1}",
+                "created_at": _now_iso(),
+                "keyframe_index": int(keyframe_index),
+                "keyframe_url": keyframe.get("url", ""),
+                "timestamp": keyframe.get("timestamp", 0),
+                "pose": keyframe.get("pose"),
+                "x": round(float(x_fraction), 4),
+                "y": round(float(y_fraction), 4),
+                "patch_url": (
+                    f"/teach-routes/{safe_route_id}/landmarks/{filename}"
+                ),
+                "patch_path": str(patch_path),
+                **crop_info,
+            }
+            landmarks.append(landmark)
+            route["landmark_count"] = len(landmarks)
+            self.save()
+            return copy.deepcopy(landmark)
+
+    def delete_landmark(self, route_id: str, landmark_id: str) -> None:
+        with self.lock:
+            route_index = self._route_index_locked(route_id)
+            route = self.routes[route_index]
+            landmarks = route.get("landmarks", [])
+            kept_landmarks = [
+                landmark
+                for landmark in landmarks
+                if landmark.get("id") != landmark_id
+            ]
+
+            if len(kept_landmarks) == len(landmarks):
+                raise ValueError("Landmark was not found")
+
+            removed = next(
+                landmark
+                for landmark in landmarks
+                if landmark.get("id") == landmark_id
+            )
+            patch_path = Path(removed.get("patch_path", ""))
+
+            if patch_path.exists() and patch_path.is_file():
+                patch_path.unlink()
+
+            route["landmarks"] = kept_landmarks
+            route["landmark_count"] = len(kept_landmarks)
+            self.save()
+
+    def get_route(self, route_id: str) -> dict[str, Any]:
+        with self.lock:
+            return copy.deepcopy(self.routes[self._route_index_locked(route_id)])
 
     def state_locked(self) -> dict[str, Any]:
         active = None
@@ -317,8 +476,13 @@ class TeachRouteStore:
                     "distance_mm": route.get("distance_mm", 0),
                     "sample_count": route.get("sample_count", 0),
                     "keyframe_count": route.get("keyframe_count", 0),
+                    "landmark_count": route.get(
+                        "landmark_count",
+                        len(route.get("landmarks", [])),
+                    ),
                     "points": route.get("points", []),
-                    "keyframes": route.get("keyframes", [])[:3],
+                    "keyframes": route.get("keyframes", []),
+                    "landmarks": route.get("landmarks", []),
                 }
                 for route in self.routes
             ],
@@ -343,15 +507,52 @@ class TeachRouteStore:
 
         return path
 
+    def landmark_path(self, route_id: str, filename: str) -> Path:
+        safe_route_id = Path(route_id).name
+        safe_filename = Path(filename).name
+        path = (
+            self.keyframe_dir
+            / safe_route_id
+            / TEACH_LANDMARK_DIR_NAME
+            / safe_filename
+        ).resolve()
+        landmark_root = (
+            self.keyframe_dir
+            / safe_route_id
+            / TEACH_LANDMARK_DIR_NAME
+        ).resolve()
+
+        if (
+            landmark_root not in path.parents
+            or not path.exists()
+            or not path.is_file()
+        ):
+            raise ValueError("Landmark image was not found")
+
+        return path
+
 
 class TeachRouteReplayer:
-    def __init__(self, roomba: Any, route_store: TeachRouteStore) -> None:
+    def __init__(
+        self,
+        roomba: Any,
+        route_store: TeachRouteStore,
+        camera: Optional[Any] = None,
+    ) -> None:
         self.roomba = roomba
         self.route_store = route_store
+        self.camera = camera
         self.lock = threading.Lock()
         self.cancel_event = threading.Event()
         self.thread: Optional[threading.Thread] = None
         self.last_heartbeat = time.monotonic()
+        self.last_vision_check = 0.0
+        self.current_vision_correction = 0
+        self.template_cache: dict[str, Any] = {}
+        self.vision_data: dict[str, Any] = self._vision_status(
+            False,
+            "No route replay",
+        )
         self.status_data: dict[str, Any] = {
             "state": "idle",
             "message": "Ready",
@@ -361,6 +562,28 @@ class TeachRouteReplayer:
             "sample_index": 0,
             "sample_count": 0,
             "pose": None,
+            "vision": copy.deepcopy(self.vision_data),
+        }
+
+    def _vision_status(
+        self,
+        enabled: bool,
+        message: str,
+        landmark: Optional[dict[str, Any]] = None,
+        score: float = 0.0,
+        offset: float = 0.0,
+        correction: int = 0,
+        seen: bool = False,
+    ) -> dict[str, Any]:
+        return {
+            "enabled": enabled,
+            "message": message,
+            "landmark_id": landmark.get("id") if landmark else None,
+            "landmark_name": landmark.get("name") if landmark else None,
+            "score": round(float(score), 3),
+            "offset": round(float(offset), 3),
+            "correction": int(correction),
+            "seen": bool(seen),
         }
 
     def is_busy(self) -> bool:
@@ -402,6 +625,7 @@ class TeachRouteReplayer:
         sample_index: int = 0,
         sample_count: int = 0,
         pose: Optional[dict[str, Any]] = None,
+        vision: Optional[dict[str, Any]] = None,
     ) -> None:
         route_id = None
         route_name = None
@@ -420,15 +644,16 @@ class TeachRouteReplayer:
                 "sample_index": sample_index,
                 "sample_count": sample_count,
                 "pose": copy.deepcopy(pose),
+                "vision": copy.deepcopy(vision or self.vision_data),
             }
 
-    def _sample_speeds(self, sample: dict[str, Any]) -> tuple[int, int]:
-        def clamp(speed: int) -> int:
-            return max(
-                -TEACH_REPLAY_MAX_WHEEL_SPEED,
-                min(TEACH_REPLAY_MAX_WHEEL_SPEED, speed),
-            )
+    def _clamp_wheel_speed(self, speed: int) -> int:
+        return max(
+            -TEACH_REPLAY_MAX_WHEEL_SPEED,
+            min(TEACH_REPLAY_MAX_WHEEL_SPEED, int(speed)),
+        )
 
+    def _sample_speeds(self, sample: dict[str, Any]) -> tuple[int, int]:
         try:
             left = int(round(float(sample.get("left", 0))))
             right = int(round(float(sample.get("right", 0))))
@@ -437,8 +662,234 @@ class TeachRouteReplayer:
             right = 0
 
         return (
-            clamp(left),
-            clamp(right),
+            self._clamp_wheel_speed(left),
+            self._clamp_wheel_speed(right),
+        )
+
+    def _select_landmark(
+        self,
+        route: dict[str, Any],
+        sample: dict[str, Any],
+    ) -> Optional[dict[str, Any]]:
+        landmarks = route.get("landmarks", [])
+
+        if not landmarks:
+            return None
+
+        try:
+            sample_time = float(sample.get("t", 0))
+        except (TypeError, ValueError):
+            sample_time = 0.0
+
+        closest = min(
+            landmarks,
+            key=lambda landmark: abs(
+                float(landmark.get("timestamp", 0)) - sample_time
+            ),
+        )
+        landmark_time = float(closest.get("timestamp", 0))
+
+        if (
+            abs(landmark_time - sample_time)
+            > VISION_LANDMARK_TIME_WINDOW_SECONDS
+        ):
+            return None
+
+        return closest
+
+    def _load_cv2(self):
+        if self.camera is not None and hasattr(self.camera, "_load_cv2"):
+            cv2 = self.camera._load_cv2()
+
+            if cv2 is not None:
+                return cv2
+
+        try:
+            import cv2
+        except Exception:
+            return None
+
+        return cv2
+
+    def _decode_camera_frame(self):
+        if self.camera is None:
+            return None
+
+        cv2 = self._load_cv2()
+
+        if cv2 is None:
+            return None
+
+        jpeg = self.camera.get_jpeg()
+
+        if jpeg is None:
+            return None
+
+        try:
+            import numpy as np
+        except Exception:
+            return None
+
+        image_data = np.frombuffer(jpeg, dtype=np.uint8)
+        return cv2.imdecode(image_data, cv2.IMREAD_COLOR)
+
+    def _load_landmark_template(
+        self,
+        landmark: dict[str, Any],
+    ) -> Optional[Any]:
+        cv2 = self._load_cv2()
+
+        if cv2 is None:
+            return None
+
+        patch_path = str(landmark.get("patch_path", ""))
+
+        if not patch_path:
+            return None
+
+        if patch_path in self.template_cache:
+            return self.template_cache[patch_path]
+
+        template = cv2.imread(patch_path, cv2.IMREAD_GRAYSCALE)
+
+        if template is None:
+            return None
+
+        self.template_cache[patch_path] = template
+        return template
+
+    def _match_landmark(
+        self,
+        frame: Any,
+        landmark: dict[str, Any],
+    ) -> Optional[dict[str, Any]]:
+        cv2 = self._load_cv2()
+        template = self._load_landmark_template(landmark)
+
+        if cv2 is None or template is None or frame is None:
+            return None
+
+        frame_height, frame_width = frame.shape[:2]
+        template_height, template_width = template.shape[:2]
+
+        if (
+            template_width >= frame_width
+            or template_height >= frame_height
+        ):
+            return None
+
+        frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        result = cv2.matchTemplate(
+            frame_gray,
+            template,
+            cv2.TM_CCOEFF_NORMED,
+        )
+        _, score, _, max_location = cv2.minMaxLoc(result)
+        observed_x = (max_location[0] + template_width / 2) / frame_width
+        observed_y = (max_location[1] + template_height / 2) / frame_height
+        expected_x = float(landmark.get("x", 0.5))
+        expected_y = float(landmark.get("y", 0.5))
+
+        return {
+            "score": float(score),
+            "observed_x": observed_x,
+            "observed_y": observed_y,
+            "expected_x": expected_x,
+            "expected_y": expected_y,
+            "offset_x": observed_x - expected_x,
+            "offset_y": observed_y - expected_y,
+        }
+
+    def _apply_vision_correction(
+        self,
+        route: dict[str, Any],
+        sample: dict[str, Any],
+        left: int,
+        right: int,
+    ) -> tuple[int, int]:
+        landmarks = route.get("landmarks", [])
+
+        if not landmarks:
+            self.current_vision_correction = 0
+            self.vision_data = self._vision_status(
+                False,
+                "No landmarks",
+            )
+            return left, right
+
+        if self.camera is None:
+            self.current_vision_correction = 0
+            self.vision_data = self._vision_status(
+                False,
+                "No camera",
+            )
+            return left, right
+
+        if left < 35 or right < 35:
+            self.current_vision_correction = 0
+            self.vision_data = self._vision_status(
+                True,
+                "Vision paused for turn",
+            )
+            return left, right
+
+        landmark = self._select_landmark(route, sample)
+
+        if landmark is None:
+            self.current_vision_correction = 0
+            self.vision_data = self._vision_status(
+                True,
+                "Waiting for landmark",
+            )
+            return left, right
+
+        now = time.monotonic()
+
+        if now - self.last_vision_check >= VISION_MATCH_INTERVAL_SECONDS:
+            self.last_vision_check = now
+            frame = self._decode_camera_frame()
+            match = self._match_landmark(frame, landmark)
+
+            if match is None:
+                self.current_vision_correction = 0
+                self.vision_data = self._vision_status(
+                    True,
+                    "Vision unavailable",
+                    landmark,
+                )
+            elif match["score"] < VISION_MATCH_MIN_SCORE:
+                self.current_vision_correction = 0
+                self.vision_data = self._vision_status(
+                    True,
+                    "Landmark not locked",
+                    landmark,
+                    score=match["score"],
+                    offset=match["offset_x"],
+                )
+            else:
+                correction = int(round(
+                    match["offset_x"] * VISION_CORRECTION_GAIN
+                ))
+                correction = max(
+                    -VISION_CORRECTION_MAX_SPEED,
+                    min(VISION_CORRECTION_MAX_SPEED, correction),
+                )
+                self.current_vision_correction = correction
+                self.vision_data = self._vision_status(
+                    True,
+                    "Correcting from landmark",
+                    landmark,
+                    score=match["score"],
+                    offset=match["offset_x"],
+                    correction=correction,
+                    seen=True,
+                )
+
+        correction = self.current_vision_correction
+
+        return (
+            self._clamp_wheel_speed(left + correction),
+            self._clamp_wheel_speed(right - correction),
         )
 
     def _sample_wait(
@@ -489,6 +940,17 @@ class TeachRouteReplayer:
 
             self.cancel_event.clear()
             self.last_heartbeat = time.monotonic()
+            self.last_vision_check = 0.0
+            self.current_vision_correction = 0
+            self.template_cache = {}
+            self.vision_data = self._vision_status(
+                bool(route.get("landmarks", [])),
+                (
+                    "Vision ready"
+                    if route.get("landmarks", [])
+                    else "No landmarks"
+                ),
+            )
             self.thread = threading.Thread(
                 target=self._run,
                 args=(route,),
@@ -503,6 +965,7 @@ class TeachRouteReplayer:
                 "sample_index": 0,
                 "sample_count": len(samples),
                 "pose": samples[0].get("pose"),
+                "vision": copy.deepcopy(self.vision_data),
             }
             self.thread.start()
 
@@ -534,6 +997,12 @@ class TeachRouteReplayer:
 
                 self._check_heartbeat()
                 left, right = self._sample_speeds(sample)
+                left, right = self._apply_vision_correction(
+                    route,
+                    sample,
+                    left,
+                    right,
+                )
                 pose = sample.get("pose")
 
                 self.roomba.drive_wheels(
