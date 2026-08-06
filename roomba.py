@@ -1,3 +1,4 @@
+import os
 import threading
 import time
 
@@ -15,6 +16,16 @@ class RoombaController:
         self.speed = speed
         self.lock = threading.Lock()
         self.vacuum_enabled = False
+        self.wake_gpio = os.environ.get("ROOMBA_WAKE_GPIO", "").strip()
+        self.wake_pulse_seconds = float(
+            os.environ.get("ROOMBA_WAKE_PULSE_SECONDS", "0.65")
+        )
+        self.wake_settle_seconds = float(
+            os.environ.get("ROOMBA_WAKE_SETTLE_SECONDS", "1.2")
+        )
+        self.start_attempts = int(
+            os.environ.get("ROOMBA_START_ATTEMPTS", "4")
+        )
 
     def _send(self, command: list[int]) -> None:
         with self.lock:
@@ -86,14 +97,72 @@ class RoombaController:
             ),
         }
 
+    def _pulse_serial_wake_lines(self) -> None:
+        with self.lock:
+            try:
+                self.serial.dtr = False
+                self.serial.rts = False
+                self.serial.break_condition = True
+                time.sleep(self.wake_pulse_seconds)
+                self.serial.break_condition = False
+                self.serial.dtr = True
+                self.serial.rts = True
+                self.serial.flush()
+            except Exception:
+                try:
+                    self.serial.break_condition = False
+                except Exception:
+                    pass
+
+    def _pulse_gpio_wake_line(self) -> None:
+        if not self.wake_gpio:
+            return
+
+        try:
+            pin = int(self.wake_gpio)
+        except ValueError:
+            return
+
+        try:
+            import RPi.GPIO as GPIO
+        except Exception:
+            return
+
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setup(pin, GPIO.OUT, initial=GPIO.HIGH)
+        time.sleep(0.05)
+        GPIO.output(pin, GPIO.LOW)
+        time.sleep(self.wake_pulse_seconds)
+        GPIO.output(pin, GPIO.HIGH)
+
+    def wake(self) -> None:
+        self._pulse_serial_wake_lines()
+        self._pulse_gpio_wake_line()
+        time.sleep(self.wake_settle_seconds)
+
+    def _verify_open_interface(self) -> None:
+        self.read_bumps_wheel_drops()
+
     def start(self) -> None:
-        self._send([128])
-        time.sleep(0.12)
+        last_error = None
 
-        self._send([131])
-        time.sleep(0.12)
+        for _ in range(max(1, self.start_attempts)):
+            try:
+                self.wake()
+                self._send([128])
+                time.sleep(0.2)
+                self._send([131])
+                time.sleep(0.2)
+                self._verify_open_interface()
+                self.stop()
+                return
+            except Exception as error:
+                last_error = error
+                time.sleep(0.4)
 
-        self.stop()
+        raise ConnectionError(
+            "Roomba did not answer after wake/start attempts"
+        ) from last_error
 
     @staticmethod
     def _signed_16(value: int) -> list[int]:

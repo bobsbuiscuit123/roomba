@@ -1390,7 +1390,7 @@ function applyState(data) {
         const obstacle = teachReplay.obstacle || {};
         const replayMessage = obstacle.active
             ? obstacle.message
-            : "Replaying route";
+            : teachReplay.message || "Replaying route";
         const visionText = vision.enabled
             ? " | "
                 + vision.message

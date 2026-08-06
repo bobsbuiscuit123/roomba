@@ -25,6 +25,14 @@ teach_replayer = TeachRouteReplayer(roomba, teach_routes, camera)
 roomba_started = False
 
 
+def stop_active_motion() -> None:
+    for stop_action in (cleaner.stop, teach_replayer.stop):
+        try:
+            stop_action()
+        except Exception:
+            pass
+
+
 def is_motion_recording():
     return room_map.is_mapping_active() or teach_routes.is_active()
 
@@ -66,12 +74,20 @@ def start_page():
 def start_roomba():
     global roomba_started
 
-    cleaner.stop()
-    teach_replayer.stop()
+    roomba_started = False
+    stop_active_motion()
     room_map.cancel_mapping()
     teach_routes.cancel()
-    roomba.start()
-    roomba.stop()
+
+    try:
+        roomba.start()
+        roomba.stop()
+    except Exception as error:
+        return jsonify({
+            "ok": False,
+            "error": str(error) or "Could not wake Roomba",
+        }), 503
+
     roomba_started = True
 
     return jsonify({

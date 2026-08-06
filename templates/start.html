@@ -36,7 +36,7 @@
 
         startButton.addEventListener("click", async () => {
             startButton.disabled = true;
-            statusText.textContent = "Starting Roomba...";
+            statusText.textContent = "Waking Roomba...";
 
             try {
                 const response = await fetch("/start", {
@@ -52,7 +52,7 @@
                 statusText.textContent = "Connected";
                 window.location.href = data.redirect;
             } catch (error) {
-                statusText.textContent = "Could not start Roomba";
+                statusText.textContent = error.message || "Could not start Roomba";
                 startButton.disabled = false;
                 console.error(error);
             }

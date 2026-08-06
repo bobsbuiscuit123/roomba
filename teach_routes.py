@@ -34,10 +34,19 @@ TEACH_REPLAY_SLEEP_SLICE_SECONDS = 0.05
 TEACH_REPLAY_HEARTBEAT_TIMEOUT_SECONDS = 2.5
 TEACH_REPLAY_MAX_WHEEL_SPEED = 500
 VISION_MATCH_INTERVAL_SECONDS = 0.25
-VISION_LANDMARK_TIME_WINDOW_SECONDS = 2.0
+VISION_LANDMARK_EARLY_SECONDS = 0.35
+VISION_LANDMARK_LATE_SECONDS = 2.0
 VISION_MATCH_MIN_SCORE = 0.45
 VISION_CORRECTION_GAIN = 180.0
 VISION_CORRECTION_MAX_SPEED = 55
+VISION_REACQUIRE_TIMEOUT_SECONDS = 30.0
+VISION_REACQUIRE_SWEEP_SPEED = 55
+VISION_REACQUIRE_SWEEP_SECONDS = 0.18
+VISION_REACQUIRE_SETTLE_SECONDS = 0.08
+VISION_REVERSE_AFTER_SCAN_COUNT = 4
+VISION_REVERSE_SPEED_SCALE = 0.65
+VISION_REVERSE_MAX_SAMPLE_SECONDS = 0.18
+VISION_REVERSE_STEP_SECONDS = 0.75
 BUMPER_CHECK_INTERVAL_SECONDS = 0.08
 OBSTACLE_REVERSE_SPEED = -130
 OBSTACLE_TURN_SPEED = 125
@@ -577,6 +586,7 @@ class TeachRouteReplayer:
         self.thread: Optional[threading.Thread] = None
         self.last_heartbeat = time.monotonic()
         self.last_vision_check = 0.0
+        self.active_landmark_id: Optional[str] = None
         self.current_vision_correction = 0
         self.template_cache: dict[str, Any] = {}
         self.last_bumper_check = 0.0
@@ -723,21 +733,27 @@ class TeachRouteReplayer:
         except (TypeError, ValueError):
             sample_time = 0.0
 
-        closest = min(
-            landmarks,
-            key=lambda landmark: abs(
-                float(landmark.get("timestamp", 0)) - sample_time
-            ),
-        )
-        landmark_time = float(closest.get("timestamp", 0))
+        candidate_landmarks = []
 
-        if (
-            abs(landmark_time - sample_time)
-            > VISION_LANDMARK_TIME_WINDOW_SECONDS
-        ):
+        for landmark in landmarks:
+            try:
+                landmark_time = float(landmark.get("timestamp", 0))
+            except (TypeError, ValueError):
+                landmark_time = 0.0
+
+            if (
+                sample_time >= landmark_time - VISION_LANDMARK_EARLY_SECONDS
+                and sample_time <= landmark_time + VISION_LANDMARK_LATE_SECONDS
+            ):
+                candidate_landmarks.append((landmark_time, landmark))
+
+        if not candidate_landmarks:
             return None
 
-        return closest
+        return min(
+            candidate_landmarks,
+            key=lambda item: abs(item[0] - sample_time),
+        )[1]
 
     def _load_cv2(self):
         if self.camera is not None and hasattr(self.camera, "_load_cv2"):
@@ -848,10 +864,213 @@ class TeachRouteReplayer:
             "offset_y": observed_y - expected_y,
         }
 
+    def _match_live_landmark(
+        self,
+        landmark: dict[str, Any],
+    ) -> Optional[dict[str, Any]]:
+        frame = self._decode_camera_frame()
+        return self._match_landmark(frame, landmark)
+
+    def _set_correction_from_match(
+        self,
+        landmark: dict[str, Any],
+        match: dict[str, Any],
+        message: str = "Correcting from landmark",
+    ) -> None:
+        correction = int(round(
+            match["offset_x"] * VISION_CORRECTION_GAIN
+        ))
+        correction = max(
+            -VISION_CORRECTION_MAX_SPEED,
+            min(VISION_CORRECTION_MAX_SPEED, correction),
+        )
+        self.current_vision_correction = correction
+        self.vision_data = self._vision_status(
+            True,
+            message,
+            landmark,
+            score=match["score"],
+            offset=match["offset_x"],
+            correction=correction,
+            seen=True,
+        )
+
+    def _match_is_locked(self, match: Optional[dict[str, Any]]) -> bool:
+        return bool(match and match["score"] >= VISION_MATCH_MIN_SCORE)
+
+    def _sample_time_delta(
+        self,
+        sample: dict[str, Any],
+        next_sample: Optional[dict[str, Any]],
+    ) -> float:
+        if next_sample is None:
+            return TEACH_REPLAY_FINAL_SAMPLE_SECONDS
+
+        try:
+            duration = float(next_sample.get("t", 0)) - float(
+                sample.get("t", 0)
+            )
+        except (TypeError, ValueError):
+            duration = TEACH_REPLAY_MIN_SAMPLE_SECONDS
+
+        return max(TEACH_REPLAY_MIN_SAMPLE_SECONDS, duration)
+
+    def _reverse_route_step(
+        self,
+        route: dict[str, Any],
+        reverse_index: int,
+    ) -> int:
+        samples = route.get("samples", [])
+
+        if reverse_index <= 0 or not samples:
+            return reverse_index
+
+        self.current_vision_correction = 0
+        self.vision_data = self._vision_status(
+            True,
+            "Backtracking to landmark",
+        )
+        self._set_status(
+            "running",
+            "Backtracking to landmark",
+            route,
+        )
+
+        spent = 0.0
+        index = min(reverse_index, len(samples) - 1)
+
+        while index >= 0 and spent < VISION_REVERSE_STEP_SECONDS:
+            if self.cancel_event.is_set():
+                raise TeachRouteReplayCancelled()
+
+            self._check_heartbeat()
+            sample = samples[index]
+            next_sample = (
+                samples[index + 1]
+                if index + 1 < len(samples)
+                else None
+            )
+            left, right = self._sample_speeds(sample)
+            duration = min(
+                VISION_REVERSE_MAX_SAMPLE_SECONDS,
+                self._sample_time_delta(sample, next_sample),
+                VISION_REVERSE_STEP_SECONDS - spent,
+            )
+
+            index -= 1
+
+            if duration <= 0 or (left == 0 and right == 0):
+                continue
+
+            self._drive_for(
+                int(round(-left * VISION_REVERSE_SPEED_SCALE)),
+                int(round(-right * VISION_REVERSE_SPEED_SCALE)),
+                duration,
+            )
+            spent += duration
+
+        self.roomba.stop()
+        self._motion_sleep(VISION_REACQUIRE_SETTLE_SECONDS)
+        return max(0, index)
+
+    def _search_for_landmark(
+        self,
+        route: dict[str, Any],
+        landmark: dict[str, Any],
+        current_sample_index: int,
+    ) -> None:
+        deadline = time.monotonic() + VISION_REACQUIRE_TIMEOUT_SECONDS
+        direction = 1
+        best_score = 0.0
+        scan_count = 0
+        reverse_index = min(
+            max(0, current_sample_index - 1),
+            max(0, len(route.get("samples", [])) - 1),
+        )
+
+        self.current_vision_correction = 0
+        self.vision_data = self._vision_status(
+            True,
+            "Searching for landmark",
+            landmark,
+        )
+        self._set_status(
+            "running",
+            "Searching for landmark",
+            route,
+        )
+        self.roomba.stop()
+        self._motion_sleep(VISION_REACQUIRE_SETTLE_SECONDS)
+
+        while time.monotonic() < deadline:
+            if self.cancel_event.is_set():
+                raise TeachRouteReplayCancelled()
+
+            self._check_heartbeat()
+            self._check_obstacle(route)
+            match = self._match_live_landmark(landmark)
+
+            if match is not None:
+                best_score = max(best_score, float(match["score"]))
+
+            if self._match_is_locked(match):
+                self.roomba.stop()
+                self._set_correction_from_match(
+                    landmark,
+                    match,
+                    "Landmark reacquired",
+                )
+                return
+
+            self.vision_data = self._vision_status(
+                True,
+                "Scanning for landmark",
+                landmark,
+                score=best_score,
+                offset=match["offset_x"] if match else 0.0,
+            )
+            self._set_status(
+                "running",
+                "Scanning for landmark",
+                route,
+            )
+
+            self._drive_for(
+                -VISION_REACQUIRE_SWEEP_SPEED * direction,
+                VISION_REACQUIRE_SWEEP_SPEED * direction,
+                VISION_REACQUIRE_SWEEP_SECONDS,
+            )
+            self.roomba.stop()
+            self._motion_sleep(VISION_REACQUIRE_SETTLE_SECONDS)
+            direction *= -1
+            scan_count += 1
+
+            if (
+                scan_count % VISION_REVERSE_AFTER_SCAN_COUNT == 0
+                and reverse_index > 0
+            ):
+                reverse_index = self._reverse_route_step(
+                    route,
+                    reverse_index,
+                )
+
+        self.current_vision_correction = 0
+        self.vision_data = self._vision_status(
+            True,
+            "Landmark lost",
+            landmark,
+            score=best_score,
+        )
+        raise RuntimeError(
+            "Landmark lost during route replay: "
+            + str(landmark.get("name", "landmark"))
+        )
+
     def _apply_vision_correction(
         self,
         route: dict[str, Any],
         sample: dict[str, Any],
+        sample_index: int,
         left: int,
         right: int,
     ) -> tuple[int, int]:
@@ -884,6 +1103,7 @@ class TeachRouteReplayer:
         landmark = self._select_landmark(route, sample)
 
         if landmark is None:
+            self.active_landmark_id = None
             self.current_vision_correction = 0
             self.vision_data = self._vision_status(
                 True,
@@ -892,21 +1112,25 @@ class TeachRouteReplayer:
             return left, right
 
         now = time.monotonic()
+        landmark_id = str(landmark.get("id", ""))
+        should_check_vision = (
+            landmark_id != self.active_landmark_id
+            or now - self.last_vision_check >= VISION_MATCH_INTERVAL_SECONDS
+        )
 
-        if now - self.last_vision_check >= VISION_MATCH_INTERVAL_SECONDS:
+        if should_check_vision:
+            self.active_landmark_id = landmark_id
             self.last_vision_check = now
-            frame = self._decode_camera_frame()
-            match = self._match_landmark(frame, landmark)
+            match = self._match_live_landmark(landmark)
 
             if match is None:
-                self.current_vision_correction = 0
                 self.vision_data = self._vision_status(
                     True,
                     "Vision unavailable",
                     landmark,
                 )
+                self._search_for_landmark(route, landmark, sample_index)
             elif match["score"] < VISION_MATCH_MIN_SCORE:
-                self.current_vision_correction = 0
                 self.vision_data = self._vision_status(
                     True,
                     "Landmark not locked",
@@ -914,23 +1138,11 @@ class TeachRouteReplayer:
                     score=match["score"],
                     offset=match["offset_x"],
                 )
+                self._search_for_landmark(route, landmark, sample_index)
             else:
-                correction = int(round(
-                    match["offset_x"] * VISION_CORRECTION_GAIN
-                ))
-                correction = max(
-                    -VISION_CORRECTION_MAX_SPEED,
-                    min(VISION_CORRECTION_MAX_SPEED, correction),
-                )
-                self.current_vision_correction = correction
-                self.vision_data = self._vision_status(
-                    True,
-                    "Correcting from landmark",
+                self._set_correction_from_match(
                     landmark,
-                    score=match["score"],
-                    offset=match["offset_x"],
-                    correction=correction,
-                    seen=True,
+                    match,
                 )
 
         correction = self.current_vision_correction
@@ -1076,19 +1288,9 @@ class TeachRouteReplayer:
         sample: dict[str, Any],
         next_sample: Optional[dict[str, Any]],
     ) -> float:
-        if next_sample is None:
-            return TEACH_REPLAY_FINAL_SAMPLE_SECONDS
-
-        try:
-            duration = float(next_sample.get("t", 0)) - float(
-                sample.get("t", 0)
-            )
-        except (TypeError, ValueError):
-            duration = TEACH_REPLAY_MIN_SAMPLE_SECONDS
-
         return min(
             TEACH_REPLAY_MAX_SAMPLE_SECONDS,
-            max(TEACH_REPLAY_MIN_SAMPLE_SECONDS, duration),
+            self._sample_time_delta(sample, next_sample),
         )
 
     def _sleep_with_cancel(
@@ -1129,6 +1331,7 @@ class TeachRouteReplayer:
             self.last_heartbeat = time.monotonic()
             self.last_vision_check = 0.0
             self.current_vision_correction = 0
+            self.active_landmark_id = None
             self.last_bumper_check = 0.0
             self.obstacle_count = 0
             self.obstacle_data = {
@@ -1198,6 +1401,7 @@ class TeachRouteReplayer:
                 left, right = self._apply_vision_correction(
                     route,
                     sample,
+                    index,
                     left,
                     right,
                 )
