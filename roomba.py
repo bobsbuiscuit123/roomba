@@ -61,6 +61,31 @@ class RoombaController:
 
         return distance, angle
 
+    def read_bumps_wheel_drops(self) -> dict:
+        data = self._query_list([7], 1, timeout=0.08)
+        value = data[0]
+
+        bump_right = bool(value & 0b00001)
+        bump_left = bool(value & 0b00010)
+        wheel_drop_right = bool(value & 0b00100)
+        wheel_drop_left = bool(value & 0b01000)
+        wheel_drop_caster = bool(value & 0b10000)
+
+        return {
+            "raw": value,
+            "bump_left": bump_left,
+            "bump_right": bump_right,
+            "bump": bump_left or bump_right,
+            "wheel_drop_left": wheel_drop_left,
+            "wheel_drop_right": wheel_drop_right,
+            "wheel_drop_caster": wheel_drop_caster,
+            "wheel_drop": (
+                wheel_drop_left
+                or wheel_drop_right
+                or wheel_drop_caster
+            ),
+        }
+
     def start(self) -> None:
         self._send([128])
         time.sleep(0.12)

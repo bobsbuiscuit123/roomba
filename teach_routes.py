@@ -38,6 +38,14 @@ VISION_LANDMARK_TIME_WINDOW_SECONDS = 2.0
 VISION_MATCH_MIN_SCORE = 0.45
 VISION_CORRECTION_GAIN = 180.0
 VISION_CORRECTION_MAX_SPEED = 55
+BUMPER_CHECK_INTERVAL_SECONDS = 0.08
+OBSTACLE_REVERSE_SPEED = -130
+OBSTACLE_TURN_SPEED = 125
+OBSTACLE_ARC_FAST_SPEED = 135
+OBSTACLE_ARC_SLOW_SPEED = 55
+OBSTACLE_REVERSE_SECONDS = 0.35
+OBSTACLE_TURN_SECONDS = 0.35
+OBSTACLE_ARC_SECONDS = 0.55
 
 
 class TeachRouteReplayCancelled(Exception):
@@ -571,6 +579,15 @@ class TeachRouteReplayer:
         self.last_vision_check = 0.0
         self.current_vision_correction = 0
         self.template_cache: dict[str, Any] = {}
+        self.last_bumper_check = 0.0
+        self.obstacle_count = 0
+        self.obstacle_data: dict[str, Any] = {
+            "active": False,
+            "count": 0,
+            "message": "",
+            "bump_left": False,
+            "bump_right": False,
+        }
         self.vision_data: dict[str, Any] = self._vision_status(
             False,
             "No route replay",
@@ -585,6 +602,7 @@ class TeachRouteReplayer:
             "sample_count": 0,
             "pose": None,
             "vision": copy.deepcopy(self.vision_data),
+            "obstacle": copy.deepcopy(self.obstacle_data),
         }
 
     def _vision_status(
@@ -648,6 +666,7 @@ class TeachRouteReplayer:
         sample_count: int = 0,
         pose: Optional[dict[str, Any]] = None,
         vision: Optional[dict[str, Any]] = None,
+        obstacle: Optional[dict[str, Any]] = None,
     ) -> None:
         route_id = None
         route_name = None
@@ -667,6 +686,7 @@ class TeachRouteReplayer:
                 "sample_count": sample_count,
                 "pose": copy.deepcopy(pose),
                 "vision": copy.deepcopy(vision or self.vision_data),
+                "obstacle": copy.deepcopy(obstacle or self.obstacle_data),
             }
 
     def _clamp_wheel_speed(self, speed: int) -> int:
@@ -736,6 +756,12 @@ class TeachRouteReplayer:
     def _decode_camera_frame(self):
         if self.camera is None:
             return None
+
+        if hasattr(self.camera, "get_frame"):
+            frame = self.camera.get_frame()
+
+            if frame is not None:
+                return frame
 
         cv2 = self._load_cv2()
 
@@ -914,6 +940,137 @@ class TeachRouteReplayer:
             self._clamp_wheel_speed(right - correction),
         )
 
+    def _motion_sleep(self, duration: float) -> None:
+        deadline = time.monotonic() + max(0.0, duration)
+
+        while True:
+            if self.cancel_event.is_set():
+                raise TeachRouteReplayCancelled()
+
+            self._check_heartbeat()
+            remaining = deadline - time.monotonic()
+
+            if remaining <= 0:
+                return
+
+            time.sleep(min(remaining, TEACH_REPLAY_SLEEP_SLICE_SECONDS))
+
+    def _read_bumper_state(self) -> Optional[dict[str, Any]]:
+        if not hasattr(self.roomba, "read_bumps_wheel_drops"):
+            return None
+
+        try:
+            return self.roomba.read_bumps_wheel_drops()
+        except Exception:
+            return None
+
+    def _drive_for(
+        self,
+        left: int,
+        right: int,
+        duration: float,
+    ) -> None:
+        self.roomba.drive_wheels(
+            right_speed=self._clamp_wheel_speed(right),
+            left_speed=self._clamp_wheel_speed(left),
+        )
+        self._motion_sleep(duration)
+
+    def _set_obstacle_status(
+        self,
+        active: bool,
+        message: str,
+        bump_state: Optional[dict[str, Any]] = None,
+    ) -> None:
+        self.obstacle_data = {
+            "active": active,
+            "count": self.obstacle_count,
+            "message": message,
+            "bump_left": bool(
+                bump_state and bump_state.get("bump_left")
+            ),
+            "bump_right": bool(
+                bump_state and bump_state.get("bump_right")
+            ),
+        }
+
+    def _avoid_obstacle(
+        self,
+        route: dict[str, Any],
+        bump_state: dict[str, Any],
+    ) -> None:
+        self.obstacle_count += 1
+        self.current_vision_correction = 0
+
+        if bump_state.get("wheel_drop"):
+            raise RuntimeError("Wheel drop detected during route replay")
+
+        bump_left = bool(bump_state.get("bump_left"))
+        bump_right = bool(bump_state.get("bump_right"))
+
+        if bump_left and not bump_right:
+            turn_left = OBSTACLE_TURN_SPEED
+            turn_right = -OBSTACLE_TURN_SPEED
+            arc_left = OBSTACLE_ARC_FAST_SPEED
+            arc_right = OBSTACLE_ARC_SLOW_SPEED
+            message = "Avoiding left bump"
+        elif bump_right and not bump_left:
+            turn_left = -OBSTACLE_TURN_SPEED
+            turn_right = OBSTACLE_TURN_SPEED
+            arc_left = OBSTACLE_ARC_SLOW_SPEED
+            arc_right = OBSTACLE_ARC_FAST_SPEED
+            message = "Avoiding right bump"
+        else:
+            turn_left = -OBSTACLE_TURN_SPEED
+            turn_right = OBSTACLE_TURN_SPEED
+            arc_left = OBSTACLE_ARC_SLOW_SPEED
+            arc_right = OBSTACLE_ARC_FAST_SPEED
+            message = "Avoiding obstacle"
+
+        self._set_obstacle_status(True, message, bump_state)
+        self._set_status("running", message, route)
+        self.roomba.stop()
+        self._motion_sleep(0.08)
+
+        self._drive_for(
+            OBSTACLE_REVERSE_SPEED,
+            OBSTACLE_REVERSE_SPEED,
+            OBSTACLE_REVERSE_SECONDS,
+        )
+        self.roomba.stop()
+        self._motion_sleep(0.05)
+
+        self._drive_for(turn_left, turn_right, OBSTACLE_TURN_SECONDS)
+        self.roomba.stop()
+        self._motion_sleep(0.05)
+
+        self._drive_for(arc_left, arc_right, OBSTACLE_ARC_SECONDS)
+        self.roomba.stop()
+        self._motion_sleep(0.05)
+
+        self._set_obstacle_status(False, "Obstacle cleared", bump_state)
+
+    def _check_obstacle(
+        self,
+        route: dict[str, Any],
+    ) -> None:
+        now = time.monotonic()
+
+        if now - self.last_bumper_check < BUMPER_CHECK_INTERVAL_SECONDS:
+            return
+
+        self.last_bumper_check = now
+        bump_state = self._read_bumper_state()
+
+        if not bump_state:
+            return
+
+        if bump_state.get("wheel_drop"):
+            raise RuntimeError("Wheel drop detected during route replay")
+
+        if bump_state.get("bump"):
+            self._avoid_obstacle(route, bump_state)
+
     def _sample_wait(
         self,
         sample: dict[str, Any],
@@ -934,7 +1091,11 @@ class TeachRouteReplayer:
             max(TEACH_REPLAY_MIN_SAMPLE_SECONDS, duration),
         )
 
-    def _sleep_with_cancel(self, duration: float) -> None:
+    def _sleep_with_cancel(
+        self,
+        duration: float,
+        route: Optional[dict[str, Any]] = None,
+    ) -> None:
         deadline = time.monotonic() + max(0.0, duration)
 
         while True:
@@ -942,6 +1103,10 @@ class TeachRouteReplayer:
                 raise TeachRouteReplayCancelled()
 
             self._check_heartbeat()
+
+            if route is not None:
+                self._check_obstacle(route)
+
             remaining = deadline - time.monotonic()
 
             if remaining <= 0:
@@ -964,6 +1129,15 @@ class TeachRouteReplayer:
             self.last_heartbeat = time.monotonic()
             self.last_vision_check = 0.0
             self.current_vision_correction = 0
+            self.last_bumper_check = 0.0
+            self.obstacle_count = 0
+            self.obstacle_data = {
+                "active": False,
+                "count": 0,
+                "message": "",
+                "bump_left": False,
+                "bump_right": False,
+            }
             self.template_cache = {}
             self.vision_data = self._vision_status(
                 bool(route.get("landmarks", [])),
@@ -988,6 +1162,7 @@ class TeachRouteReplayer:
                 "sample_count": len(samples),
                 "pose": samples[0].get("pose"),
                 "vision": copy.deepcopy(self.vision_data),
+                "obstacle": copy.deepcopy(self.obstacle_data),
             }
             self.thread.start()
 
@@ -1018,6 +1193,7 @@ class TeachRouteReplayer:
                     raise TeachRouteReplayCancelled()
 
                 self._check_heartbeat()
+                self._check_obstacle(route)
                 left, right = self._sample_speeds(sample)
                 left, right = self._apply_vision_correction(
                     route,
@@ -1047,7 +1223,8 @@ class TeachRouteReplayer:
                     else None
                 )
                 self._sleep_with_cancel(
-                    self._sample_wait(sample, next_sample)
+                    self._sample_wait(sample, next_sample),
+                    route,
                 )
 
             self.roomba.stop()

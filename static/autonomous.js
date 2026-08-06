@@ -1365,7 +1365,9 @@ function applyState(data) {
     }
 
     if (camera.ok) {
-        cameraState.textContent = "Live";
+        cameraState.textContent = camera.latest_age
+            ? `Live - ${camera.latest_age}s`
+            : "Live";
         cameraState.title = "";
 
         if (!cameraFeedLoaded) {
@@ -1385,6 +1387,10 @@ function applyState(data) {
         const progress =
             Math.round((teachReplay.progress || 0) * 100);
         const vision = teachReplay.vision || {};
+        const obstacle = teachReplay.obstacle || {};
+        const replayMessage = obstacle.active
+            ? obstacle.message
+            : "Replaying route";
         const visionText = vision.enabled
             ? " | "
                 + vision.message
@@ -1401,7 +1407,8 @@ function applyState(data) {
             : "";
 
         autoStatus.textContent =
-            "Replaying route: "
+            replayMessage
+            + ": "
             + (teachReplay.route_name || "Route")
             + " - "
             + progress
