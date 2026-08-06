@@ -24,9 +24,18 @@
                 <p id="status" class="status">Stopped</p>
             </div>
 
-            <button id="stop" class="stop-button">
-                STOP
-            </button>
+            <div class="top-actions">
+                <a
+                    class="nav-button"
+                    href="{{ url_for('modes') }}"
+                >
+                    Modes
+                </a>
+
+                <button id="stop" class="stop-button">
+                    STOP
+                </button>
+            </div>
         </header>
 
         <section class="drive-area">

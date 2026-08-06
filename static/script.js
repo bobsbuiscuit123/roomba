@@ -346,7 +346,8 @@ async function emergencyStop() {
 
     try {
         await fetch("/stop", {
-            method: "POST"
+            method: "POST",
+            keepalive: true
         });
 
         lastSentLeft = 0;

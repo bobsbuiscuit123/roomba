@@ -755,6 +755,50 @@ class TeachRouteReplayer:
             key=lambda item: abs(item[0] - sample_time),
         )[1]
 
+    def _select_recovery_landmark(
+        self,
+        route: dict[str, Any],
+        sample_index: int,
+    ) -> Optional[dict[str, Any]]:
+        landmarks = route.get("landmarks", [])
+        samples = route.get("samples", [])
+
+        if not landmarks or not samples:
+            return None
+
+        safe_index = max(0, min(sample_index, len(samples) - 1))
+
+        try:
+            sample_time = float(samples[safe_index].get("t", 0))
+        except (TypeError, ValueError):
+            sample_time = 0.0
+
+        previous_landmarks = []
+        all_landmarks = []
+
+        for landmark in landmarks:
+            try:
+                landmark_time = float(landmark.get("timestamp", 0))
+            except (TypeError, ValueError):
+                landmark_time = 0.0
+
+            all_landmarks.append((
+                abs(landmark_time - sample_time),
+                landmark_time,
+                landmark,
+            ))
+
+            if landmark_time <= sample_time + VISION_LANDMARK_LATE_SECONDS:
+                previous_landmarks.append((landmark_time, landmark))
+
+        if previous_landmarks:
+            return max(previous_landmarks, key=lambda item: item[0])[1]
+
+        if not all_landmarks:
+            return None
+
+        return min(all_landmarks, key=lambda item: item[0])[2]
+
     def _load_cv2(self):
         if self.camera is not None and hasattr(self.camera, "_load_cv2"):
             cv2 = self.camera._load_cv2()
@@ -978,11 +1022,12 @@ class TeachRouteReplayer:
         route: dict[str, Any],
         landmark: dict[str, Any],
         current_sample_index: int,
-    ) -> None:
+    ) -> int:
         deadline = time.monotonic() + VISION_REACQUIRE_TIMEOUT_SECONDS
         direction = 1
         best_score = 0.0
         scan_count = 0
+        replay_index = current_sample_index
         reverse_index = min(
             max(0, current_sample_index - 1),
             max(0, len(route.get("samples", [])) - 1),
@@ -1007,7 +1052,17 @@ class TeachRouteReplayer:
                 raise TeachRouteReplayCancelled()
 
             self._check_heartbeat()
-            self._check_obstacle(route)
+            obstacle_index = self._check_obstacle(
+                route,
+                reverse_index,
+                recover=False,
+            )
+
+            if obstacle_index is not None:
+                reverse_index = obstacle_index
+                replay_index = min(replay_index, obstacle_index)
+                continue
+
             match = self._match_live_landmark(landmark)
 
             if match is not None:
@@ -1020,7 +1075,7 @@ class TeachRouteReplayer:
                     match,
                     "Landmark reacquired",
                 )
-                return
+                return replay_index
 
             self.vision_data = self._vision_status(
                 True,
@@ -1053,6 +1108,7 @@ class TeachRouteReplayer:
                     route,
                     reverse_index,
                 )
+                replay_index = min(replay_index, reverse_index)
 
         self.current_vision_correction = 0
         self.vision_data = self._vision_status(
@@ -1073,7 +1129,7 @@ class TeachRouteReplayer:
         sample_index: int,
         left: int,
         right: int,
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, Optional[int]]:
         landmarks = route.get("landmarks", [])
 
         if not landmarks:
@@ -1082,7 +1138,7 @@ class TeachRouteReplayer:
                 False,
                 "No landmarks",
             )
-            return left, right
+            return left, right, None
 
         if self.camera is None:
             self.current_vision_correction = 0
@@ -1090,7 +1146,7 @@ class TeachRouteReplayer:
                 False,
                 "No camera",
             )
-            return left, right
+            return left, right, None
 
         if left < 35 or right < 35:
             self.current_vision_correction = 0
@@ -1098,7 +1154,7 @@ class TeachRouteReplayer:
                 True,
                 "Vision paused for turn",
             )
-            return left, right
+            return left, right, None
 
         landmark = self._select_landmark(route, sample)
 
@@ -1109,7 +1165,7 @@ class TeachRouteReplayer:
                 True,
                 "Waiting for landmark",
             )
-            return left, right
+            return left, right, None
 
         now = time.monotonic()
         landmark_id = str(landmark.get("id", ""))
@@ -1129,7 +1185,14 @@ class TeachRouteReplayer:
                     "Vision unavailable",
                     landmark,
                 )
-                self._search_for_landmark(route, landmark, sample_index)
+                replay_index = self._search_for_landmark(
+                    route,
+                    landmark,
+                    sample_index,
+                )
+
+                if replay_index < sample_index:
+                    return left, right, replay_index
             elif match["score"] < VISION_MATCH_MIN_SCORE:
                 self.vision_data = self._vision_status(
                     True,
@@ -1138,7 +1201,14 @@ class TeachRouteReplayer:
                     score=match["score"],
                     offset=match["offset_x"],
                 )
-                self._search_for_landmark(route, landmark, sample_index)
+                replay_index = self._search_for_landmark(
+                    route,
+                    landmark,
+                    sample_index,
+                )
+
+                if replay_index < sample_index:
+                    return left, right, replay_index
             else:
                 self._set_correction_from_match(
                     landmark,
@@ -1150,6 +1220,7 @@ class TeachRouteReplayer:
         return (
             self._clamp_wheel_speed(left + correction),
             self._clamp_wheel_speed(right - correction),
+            None,
         )
 
     def _motion_sleep(self, duration: float) -> None:
@@ -1206,82 +1277,117 @@ class TeachRouteReplayer:
             ),
         }
 
-    def _avoid_obstacle(
+    def _backtrack_after_bump(
         self,
         route: dict[str, Any],
         bump_state: dict[str, Any],
-    ) -> None:
-        self.obstacle_count += 1
+        current_sample_index: int,
+        message: str,
+    ) -> int:
+        samples = route.get("samples", [])
+        sample_count = len(samples)
+        safe_index = 0
+
+        if sample_count:
+            safe_index = max(
+                0,
+                min(current_sample_index, sample_count - 1),
+            )
+
         self.current_vision_correction = 0
 
         if bump_state.get("wheel_drop"):
             raise RuntimeError("Wheel drop detected during route replay")
 
-        bump_left = bool(bump_state.get("bump_left"))
-        bump_right = bool(bump_state.get("bump_right"))
-
-        if bump_left and not bump_right:
-            turn_left = OBSTACLE_TURN_SPEED
-            turn_right = -OBSTACLE_TURN_SPEED
-            arc_left = OBSTACLE_ARC_FAST_SPEED
-            arc_right = OBSTACLE_ARC_SLOW_SPEED
-            message = "Avoiding left bump"
-        elif bump_right and not bump_left:
-            turn_left = -OBSTACLE_TURN_SPEED
-            turn_right = OBSTACLE_TURN_SPEED
-            arc_left = OBSTACLE_ARC_SLOW_SPEED
-            arc_right = OBSTACLE_ARC_FAST_SPEED
-            message = "Avoiding right bump"
-        else:
-            turn_left = -OBSTACLE_TURN_SPEED
-            turn_right = OBSTACLE_TURN_SPEED
-            arc_left = OBSTACLE_ARC_SLOW_SPEED
-            arc_right = OBSTACLE_ARC_FAST_SPEED
-            message = "Avoiding obstacle"
-
         self._set_obstacle_status(True, message, bump_state)
-        self._set_status("running", message, route)
+        self._set_status(
+            "running",
+            message,
+            route,
+            sample_index=safe_index,
+            sample_count=sample_count,
+            pose=samples[safe_index].get("pose") if samples else None,
+        )
         self.roomba.stop()
         self._motion_sleep(0.08)
 
-        self._drive_for(
-            OBSTACLE_REVERSE_SPEED,
-            OBSTACLE_REVERSE_SPEED,
-            OBSTACLE_REVERSE_SECONDS,
+        reverse_index = self._reverse_route_step(route, safe_index)
+        self.roomba.stop()
+        self._motion_sleep(VISION_REACQUIRE_SETTLE_SECONDS)
+        return reverse_index
+
+    def _recover_from_obstacle(
+        self,
+        route: dict[str, Any],
+        bump_state: dict[str, Any],
+        current_sample_index: int,
+    ) -> int:
+        reverse_index = self._backtrack_after_bump(
+            route,
+            bump_state,
+            current_sample_index,
+            "Bump detected; backtracking",
         )
-        self.roomba.stop()
-        self._motion_sleep(0.05)
+        landmark = self._select_recovery_landmark(route, reverse_index)
 
-        self._drive_for(turn_left, turn_right, OBSTACLE_TURN_SECONDS)
-        self.roomba.stop()
-        self._motion_sleep(0.05)
+        if landmark is None:
+            self._set_obstacle_status(
+                False,
+                "Bump backed up; no landmarks",
+                bump_state,
+            )
+            return reverse_index
 
-        self._drive_for(arc_left, arc_right, OBSTACLE_ARC_SECONDS)
-        self.roomba.stop()
-        self._motion_sleep(0.05)
-
-        self._set_obstacle_status(False, "Obstacle cleared", bump_state)
+        replay_index = self._search_for_landmark(
+            route,
+            landmark,
+            reverse_index,
+        )
+        self._set_obstacle_status(
+            False,
+            "Obstacle cleared; landmark reacquired",
+            bump_state,
+        )
+        return min(reverse_index, replay_index)
 
     def _check_obstacle(
         self,
         route: dict[str, Any],
-    ) -> None:
+        current_sample_index: int = 0,
+        recover: bool = True,
+    ) -> Optional[int]:
         now = time.monotonic()
 
         if now - self.last_bumper_check < BUMPER_CHECK_INTERVAL_SECONDS:
-            return
+            return None
 
         self.last_bumper_check = now
         bump_state = self._read_bumper_state()
 
         if not bump_state:
-            return
+            return None
 
         if bump_state.get("wheel_drop"):
             raise RuntimeError("Wheel drop detected during route replay")
 
         if bump_state.get("bump"):
-            self._avoid_obstacle(route, bump_state)
+            self.obstacle_count += 1
+
+            if recover:
+                return self._recover_from_obstacle(
+                    route,
+                    bump_state,
+                    current_sample_index,
+                )
+
+            return self._backtrack_after_bump(
+                route,
+                bump_state,
+                current_sample_index,
+                "Bump while searching; backtracking",
+            )
+
+        return None
 
     def _sample_wait(
         self,
@@ -1297,7 +1403,8 @@ class TeachRouteReplayer:
         self,
         duration: float,
         route: Optional[dict[str, Any]] = None,
-    ) -> None:
+        current_sample_index: int = 0,
+    ) -> Optional[int]:
         deadline = time.monotonic() + max(0.0, duration)
 
         while True:
@@ -1307,12 +1414,18 @@ class TeachRouteReplayer:
             self._check_heartbeat()
 
             if route is not None:
-                self._check_obstacle(route)
+                replay_index = self._check_obstacle(
+                    route,
+                    current_sample_index,
+                )
+
+                if replay_index is not None:
+                    return replay_index
 
             remaining = deadline - time.monotonic()
 
             if remaining <= 0:
-                return
+                return None
 
             time.sleep(min(remaining, TEACH_REPLAY_SLEEP_SLICE_SECONDS))
 
@@ -1390,21 +1503,33 @@ class TeachRouteReplayer:
 
         try:
             self.roomba.vacuum_off()
+            index = 0
 
-            for index, sample in enumerate(samples):
+            while index < sample_count:
                 if self.cancel_event.is_set():
                     raise TeachRouteReplayCancelled()
 
                 self._check_heartbeat()
-                self._check_obstacle(route)
+                replay_index = self._check_obstacle(route, index)
+
+                if replay_index is not None:
+                    index = max(0, min(replay_index, sample_count - 1))
+                    continue
+
+                sample = samples[index]
                 left, right = self._sample_speeds(sample)
-                left, right = self._apply_vision_correction(
+                left, right, replay_index = self._apply_vision_correction(
                     route,
                     sample,
                     index,
                     left,
                     right,
                 )
+
+                if replay_index is not None:
+                    index = max(0, min(replay_index, sample_count - 1))
+                    continue
+
                 pose = sample.get("pose")
 
                 self.roomba.drive_wheels(
@@ -1426,10 +1551,17 @@ class TeachRouteReplayer:
                     if index + 1 < sample_count
                     else None
                 )
-                self._sleep_with_cancel(
+                replay_index = self._sleep_with_cancel(
                     self._sample_wait(sample, next_sample),
                     route,
+                    index,
                 )
+
+                if replay_index is not None:
+                    index = max(0, min(replay_index, sample_count - 1))
+                    continue
+
+                index += 1
 
             self.roomba.stop()
             self._set_status(
